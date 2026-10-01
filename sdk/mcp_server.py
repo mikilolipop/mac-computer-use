@@ -98,7 +98,7 @@ TOOLS = [
     },
     {
         "name": "type_text",
-        "description": "Directly type text via Unicode event injection without clipboard (Cmd+V) or input method (IME) interference. Ideal for CAD command bars, terminal prompts, canvas games, and modal editors.",
+        "description": "Type text via Unicode keyboard event injection. Best suited for ASCII text, terminal prompts, CAD command bars, and modal editors. Note: For complex multi-byte text (e.g. Chinese) in browsers or native inputs, prefer set_value or paste.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -119,6 +119,21 @@ TOOLS = [
                 "y": {"type": "number", "description": "Desktop Y coordinate"}
             },
             "required": ["x", "y"]
+        }
+    },
+    {
+        "name": "scroll",
+        "description": "Scroll the target application window or container using native CGEvent scroll wheel without requiring physical focus clicks or risking link misclicks.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "app": {"type": "string", "description": "Application display name or bundle ID"},
+                "direction": {"type": "string", "enum": ["down", "up", "left", "right"], "default": "down", "description": "Scroll direction. Defaults to 'down'."},
+                "amount": {"type": "integer", "default": 5, "description": "Number of scroll lines. Defaults to 5."},
+                "x": {"type": "number", "description": "Optional desktop X coordinate to scroll over (defaults to window center)"},
+                "y": {"type": "number", "description": "Optional desktop Y coordinate to scroll over (defaults to window center)"}
+            },
+            "required": ["app"]
         }
     },
     {
@@ -148,26 +163,29 @@ TOOLS = [
     },
     {
         "name": "find_text",
-        "description": "Locate text within target application window using Apple Vision OCR. Returns text, bounds, and desktop coordinates.",
+        "description": "Locate text within target application window using Apple Vision OCR. Returns text, bounds, confidence, and desktop coordinates.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "app": {"type": "string", "description": "Application display name or bundle ID"},
                 "text": {"type": "string", "description": "Text substring or query to find in window"},
-                "exact": {"type": "boolean", "description": "Whether to require exact match. Defaults to false.", "default": False}
+                "exact": {"type": "boolean", "description": "Whether to require exact match. Defaults to false.", "default": False},
+                "min_confidence": {"type": "number", "description": "Minimum recognition confidence threshold in [0.0, 1.0]. Defaults to 0.0.", "default": 0.0}
             },
             "required": ["app", "text"]
         }
     },
     {
         "name": "click_text",
-        "description": "Locate and click text within target application window using Apple Vision OCR in a single high-speed pass.",
+        "description": "Locate and click text within target application window using Apple Vision OCR. Fails safely with AMBIGUOUS_TEXT if multiple matches exist unless disambiguated.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "app": {"type": "string", "description": "Application display name or bundle ID"},
                 "text": {"type": "string", "description": "Text substring or query to find and click"},
-                "exact": {"type": "boolean", "description": "Whether to require exact match. Defaults to false.", "default": False}
+                "exact": {"type": "boolean", "description": "Whether to require exact match. Defaults to false.", "default": False},
+                "occurrence": {"type": "integer", "description": "Optional 1-based occurrence index to click when multiple matches exist. If omitted and multiple matches exist, operation fails with AMBIGUOUS_TEXT."},
+                "min_confidence": {"type": "number", "description": "Minimum recognition confidence threshold in [0.0, 1.0]. Defaults to 0.0.", "default": 0.0}
             },
             "required": ["app", "text"]
         }
@@ -203,6 +221,7 @@ TOOLS = [
                                     "type",
                                     "paste",
                                     "navigate",
+                                    "scroll",
                                     "wait"
                                 ],
                                 "description": "Action type to perform"
@@ -235,17 +254,35 @@ TOOLS = [
                                 "type": "string",
                                 "description": "Key name for press_key (e.g. 'return', 'tab', 'escape', 'cmd+c')"
                             },
+                            "modifiers": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Optional list of modifier keys (e.g. ['cmd', 'shift'])"
+                            },
                             "url": {
                                 "type": "string",
                                 "description": "Destination URL for navigate"
                             },
+                            "direction": {
+                                "type": "string",
+                                "enum": ["down", "up", "left", "right"],
+                                "description": "Scroll direction for scroll action"
+                            },
+                            "amount": {
+                                "type": "integer",
+                                "description": "Number of scroll lines for scroll action"
+                            },
+                            "occurrence": {
+                                "type": "integer",
+                                "description": "Occurrence index for click_text action"
+                            },
                             "x": {
                                 "type": "number",
-                                "description": "Desktop X coordinate for click_coord"
+                                "description": "Desktop X coordinate for click_coord or scroll"
                             },
                             "y": {
                                 "type": "number",
-                                "description": "Desktop Y coordinate for click_coord"
+                                "description": "Desktop Y coordinate for click_coord or scroll"
                             },
                             "waitMs": {
                                 "type": "integer",
@@ -269,7 +306,7 @@ TOOLS.append({"name": "list_windows", "description": "List an app's windows befo
               "inputSchema": {"type": "object", "properties": {"app": {"type": "string"}}, "required": ["app"]}})
 
 for tool in TOOLS:
-    if tool["name"] in ("get_app_state", "batch_actions", "click", "set_value", "type_text", "navigate", "find_text", "click_text", "send_chat"):
+    if tool["name"] in ("get_app_state", "batch_actions", "click", "set_value", "type_text", "navigate", "find_text", "click_text", "send_chat", "scroll"):
         tool["inputSchema"]["properties"]["window_id"] = {"type": "integer", "minimum": 1, "description": "Target from list_windows; input requires this window to be focused. Never falls back to another window."}
     if tool["name"] == "get_app_state":
         props = tool["inputSchema"]["properties"]
@@ -434,6 +471,20 @@ def handle_call_tool(params: Dict[str, Any]) -> Dict[str, Any]:
                 "isError": not success
             }
 
+        elif name == "scroll":
+            app = args.get("app")
+            direction = args.get("direction", "down")
+            amount = args.get("amount", 5)
+            x = args.get("x")
+            y = args.get("y")
+            if not app:
+                return {"content": [{"type": "text", "text": "Error: 'app' is required"}], "isError": True}
+            success = client.scroll(app, direction=direction, amount=amount, x=x, y=y, **scope)
+            return {
+                "content": [{"type": "text", "text": json.dumps({"success": success, "status": "dispatched" if success else "failed", "app": app, "direction": direction, "amount": amount})}],
+                "isError": not success
+            }
+
         elif name == "navigate":
             app = args.get("app")
             url = args.get("url")
@@ -449,9 +500,10 @@ def handle_call_tool(params: Dict[str, Any]) -> Dict[str, Any]:
             app = args.get("app")
             text = args.get("text")
             exact = args.get("exact", False)
+            min_conf = args.get("min_confidence", 0.0)
             if not app or not text:
                 return {"content": [{"type": "text", "text": "Error: 'app' and 'text' are required"}], "isError": True}
-            result = client.find_text(app, text, exact=exact, **scope)
+            result = client.find_text(app, text, exact=exact, min_confidence=min_conf, **scope)
             return {
                 "content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False, indent=2)}],
                 "isError": not bool(result.get("success", False))
@@ -461,9 +513,11 @@ def handle_call_tool(params: Dict[str, Any]) -> Dict[str, Any]:
             app = args.get("app")
             text = args.get("text")
             exact = args.get("exact", False)
+            occurrence = args.get("occurrence")
+            min_conf = args.get("min_confidence", 0.0)
             if not app or not text:
                 return {"content": [{"type": "text", "text": "Error: 'app' and 'text' are required"}], "isError": True}
-            success = client.click_text(app, text, exact=exact, **scope)
+            success = client.click_text(app, text, exact=exact, occurrence=occurrence, min_confidence=min_conf, **scope)
             return {
                 "content": [{"type": "text", "text": json.dumps({"success": success, "status": "dispatched" if success else "failed", "app": app, "clickedText": text})}],
                 "isError": not success

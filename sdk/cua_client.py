@@ -229,18 +229,34 @@ class CuaClient:
         extra = self._snapshot_args(app, snapshot_id) if any(a.get("action") in ("click", "set_value") for a in actions) else []
         return self._run(["batch", "--app", app, "--actions", actions_json] + extra, timeout=timeout, window_id=window_id)
 
-    def find_text(self, app: str, text: str, exact: bool = False, timeout: float = 15.0, window_id: Optional[int] = None) -> Dict[str, Any]:
+    def scroll(self, app: str, direction: str = "down", amount: int = 5, x: Optional[float] = None, y: Optional[float] = None, timeout: float = 15.0, window_id: Optional[int] = None) -> bool:
+        """Scroll application contents using native CGEvent scroll wheel."""
+        args = ["scroll", "--app", app, "--direction", direction, "--amount", str(amount)]
+        if x is not None:
+            args.extend(["--x", str(x)])
+        if y is not None:
+            args.extend(["--y", str(y)])
+        res = self._run(args, timeout=timeout, window_id=window_id)
+        return bool(res.get("success", False))
+
+    def find_text(self, app: str, text: str, exact: bool = False, min_confidence: float = 0.0, timeout: float = 15.0, window_id: Optional[int] = None) -> Dict[str, Any]:
         """Locate text within target application window using compiled Apple Vision OCR."""
         args = ["find-text", "--app", app, "--text", text]
         if exact:
             args.append("--exact")
+        if min_confidence > 0:
+            args.extend(["--min-confidence", str(min_confidence)])
         return self._run(args, timeout=timeout, window_id=window_id)
 
-    def click_text(self, app: str, text: str, exact: bool = False, timeout: float = 15.0, window_id: Optional[int] = None) -> bool:
+    def click_text(self, app: str, text: str, exact: bool = False, occurrence: Optional[int] = None, min_confidence: float = 0.0, timeout: float = 15.0, window_id: Optional[int] = None) -> bool:
         """Locate and click text within target application window using compiled Apple Vision OCR."""
         args = ["click-text", "--app", app, "--text", text]
         if exact:
             args.append("--exact")
+        if occurrence is not None:
+            args.extend(["--occurrence", str(occurrence)])
+        if min_confidence > 0:
+            args.extend(["--min-confidence", str(min_confidence)])
         res = self._run(args, timeout=timeout, window_id=window_id)
         return bool(res.get("success", False))
 

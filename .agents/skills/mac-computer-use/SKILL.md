@@ -5,13 +5,13 @@ description: Use the local macOS AX/OCR engine for desktop app observation and i
 
 # macOS Computer Use
 
-This project exposes 14 MCP tools through `sdk/mcp_server.py`. Use the registered tool schemas as the parameter source; the MCP key is `app`, not `app_name`. This skill does not itself create a CDP connection or provide a browser extension.
+This project exposes 15 MCP tools through `sdk/mcp_server.py`. Use the registered tool schemas as the parameter source; the MCP key is `app`, not `app_name`. This skill does not itself create a CDP connection or provide a browser extension.
 
 ## Choose the available channel once
 
 - For an existing Edge/Chrome web session, prefer a browser connector/CDP tool **only if it can actually see that tab and logged-in session**. Do not silently switch browser/profile, restart the user's browser, expose a debugging port, or discard their tabs to make a connection work.
 - If no such connected tool is available, use the native AX/OCR fallback and state that limitation. Do not spend repeated model turns discovering the same missing bridge.
-- Use native AX for desktop controls; use OCR/images when AX does not expose the necessary content. The native tool list does not currently contain a scroll or drag tool; do not invent one.
+- Use native AX for desktop controls; use OCR/images when AX does not expose the necessary content. Use the native `scroll` tool for scoped window scrolling without physical focus clicks or risking link misclicks. The native tool list does not currently contain a drag tool; do not invent one.
 
 ## Observe with the smallest useful payload
 
@@ -60,7 +60,8 @@ The window ID and index above are illustrative: use the index observed in the ac
 
 - `set_value`: standard editable AX controls; it does not guarantee focus or submission.
 - `paste` in a batch: suitable text inputs, with clipboard restoration. Avoid CAD canvas shortcuts.
-- `type_text`: Unicode input; do not assume every application or IME handles it identically.
+- `type_text`: Unicode keyboard input; best suited for ASCII, command bars, and terminals; for multi-byte/CJK text in web forms, prefer set_value or paste.
+- `scroll`: native scoped scroll wheel; smoothly scrolls without click-to-focus or link misclick risks.
 - `send_chat`: returns `dispatched`; verify the visible result before claiming delivery.
 
 ## Recover without turning a user task into engine development

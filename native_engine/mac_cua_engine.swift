@@ -68,6 +68,21 @@ struct TextMatchResult: Codable {
     let bounds: ElementBounds
 }
 
+struct OCRMatch: Codable {
+    let text: String
+    let confidence: Float
+    let bounds: ElementBounds
+    let desktopX: Double
+    let desktopY: Double
+}
+
+struct OCRWindowFrame: Codable {
+    let windowID: CGWindowID
+    let pid: pid_t
+    let timestamp: Double
+    let matches: [OCRMatch]
+}
+
 struct GenericResponse: Codable {
     let success: Bool
     var error: String? = nil
@@ -90,6 +105,12 @@ struct GenericResponse: Codable {
     var text: String? = nil
     var code: String? = nil
     var status: String? = nil
+    var confidence: Float? = nil
+    var bounds: ElementBounds? = nil
+    var matchCount: Int? = nil
+    var matches: [OCRMatch]? = nil
+    var direction: String? = nil
+    var amount: Int? = nil
 }
 
 struct ActionItem: Codable {
@@ -106,6 +127,11 @@ struct ActionItem: Codable {
     let exact: Bool?
     let newChat: Bool?
     let pressReturn: Bool?
+    let direction: String?
+    let amount: Int?
+    let modifiers: [String]?
+    let occurrence: Int?
+    let minConfidence: Float?
 }
 
 // MARK: - JSON Output Helper
@@ -173,6 +199,9 @@ struct Snapshot: Codable {
     let bounds: ElementBounds
     let createdAt: Double
     let elements: [ParsedElement]
+    var maxNodes: Int? = 1000
+    var maxDepth: Int? = 20
+    var isTruncated: Bool? = false
 }
 
 func snapshotURL(_ id: String) -> URL? {
@@ -457,6 +486,23 @@ func isInteractiveElement(role: String, actions: [String], bounds: ElementBounds
     return interactiveRoles.contains(where: { role.contains($0) })
 }
 
+func probeHasWebArea(element: AXUIElement, depth: Int = 0, maxDepth: Int = 6) -> Bool {
+    if depth > maxDepth { return false }
+    var roleVal: AnyObject?
+    guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleVal) == .success,
+          let role = roleVal as? String else { return false }
+    if role == "AXWebArea" { return true }
+    var childrenVal: AnyObject?
+    guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenVal) == .success,
+          let children = childrenVal as? [AXUIElement] else { return false }
+    for child in children {
+        if probeHasWebArea(element: child, depth: depth + 1, maxDepth: maxDepth) {
+            return true
+        }
+    }
+    return false
+}
+
 class TreeCollector {
     var elements: [ParsedElement] = []
     var textLines: [String] = []
@@ -583,10 +629,9 @@ func findLiveElement(appPID: pid_t, targetIndex: Int) -> (element: AXUIElement, 
           let scope = focusedScope(appPID), let bounds = getElementBounds(scope),
           let windowID = scopedWindowID(appPID, bounds) else { return nil }
     let collector = TreeCollector()
-    if let raw = cliOption("--max-nodes"), let customMax = Int(raw), customMax > 0 {
-        collector.maxNodes = customMax
-    }
-    collector.collect(element: scope)
+    collector.maxNodes = snap.maxNodes ?? 1000
+    let depthToUse = snap.maxDepth ?? 20
+    collector.collect(element: scope, maxDepth: depthToUse)
     guard let offset = resolveSnapshotTarget(snap, pid: appPID, launchedAt: launch, windowID: windowID,
                           bounds: bounds, elements: collector.elements, targetIndex: targetIndex, now: Date().timeIntervalSince1970),
           offset < collector.liveElements.count else { return nil }
@@ -672,12 +717,39 @@ func captureWindow(for pid: pid_t, targetBounds: ElementBounds? = nil, noShadow:
     return (windowId, nil, bestBounds)
 }
 
-// MARK: - Native Vision OCR Engine
+// MARK: - Native Vision OCR Engine with Frame Cache & Disambiguation
 
-func findTextInWindow(appPID: pid_t, query: String, exact: Bool = false) -> TextMatchResult? {
-    guard let scope = focusedScope(appPID), let target = getElementBounds(scope), scopedWindowID(appPID, target) != nil else { return nil }
+func ocrCacheURL(for windowID: CGWindowID) -> URL {
+    return cacheDir.appendingPathComponent("ocr_\(windowID).json")
+}
+
+func invalidateOCRCache(for windowID: CGWindowID? = nil) {
+    if let wid = windowID {
+        try? FileManager.default.removeItem(at: ocrCacheURL(for: wid))
+    } else {
+        let fm = FileManager.default
+        if let files = try? fm.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: nil) {
+            for f in files where f.lastPathComponent.hasPrefix("ocr_") && f.lastPathComponent.hasSuffix(".json") {
+                try? fm.removeItem(at: f)
+            }
+        }
+    }
+}
+
+func ocrWindow(appPID: pid_t, forceRefresh: Bool = false) -> OCRWindowFrame? {
+    guard let scope = focusedScope(appPID), let target = getElementBounds(scope),
+          let windowId = scopedWindowID(appPID, target) else { return nil }
+    let cacheFile = ocrCacheURL(for: windowId)
+    if !forceRefresh,
+       let cachedData = try? Data(contentsOf: cacheFile),
+       let cached = try? JSONDecoder().decode(OCRWindowFrame.self, from: cachedData),
+       cached.windowID == windowId, cached.pid == appPID,
+       (Date().timeIntervalSince1970 - cached.timestamp) < 3.0 {
+        return cached
+    }
+
     let (windowIdOpt, pathOpt, _) = captureWindow(for: appPID, targetBounds: target, noShadow: true)
-    guard let windowId = windowIdOpt, let imagePath = pathOpt else { return nil }
+    guard let capturedWindowId = windowIdOpt, let imagePath = pathOpt else { return nil }
     defer { try? FileManager.default.removeItem(atPath: imagePath) }
 
     guard let windowListInfo = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
@@ -685,7 +757,7 @@ func findTextInWindow(appPID: pid_t, query: String, exact: Bool = false) -> Text
     }
     var winBounds: (x: Double, y: Double, w: Double, h: Double)? = nil
     for win in windowListInfo {
-        if let wid = win[kCGWindowNumber as String] as? CGWindowID, wid == windowId,
+        if let wid = win[kCGWindowNumber as String] as? CGWindowID, wid == capturedWindowId,
            let b = win[kCGWindowBounds as String] as? [String: Any],
            let x = b["X"] as? Double,
            let y = b["Y"] as? Double,
@@ -698,35 +770,51 @@ func findTextInWindow(appPID: pid_t, query: String, exact: Bool = false) -> Text
     guard let wb = winBounds else { return nil }
 
     let url = URL(fileURLWithPath: imagePath)
-    var bestMatch: TextMatchResult? = nil
+    var allMatches: [OCRMatch] = []
     let request = VNRecognizeTextRequest { req, err in
         guard let obs = req.results as? [VNRecognizedTextObservation] else { return }
         for o in obs {
             guard let top = o.topCandidates(1).first else { continue }
             let str = top.string
-            let isMatch = exact ? (str.caseInsensitiveCompare(query) == .orderedSame) : str.localizedCaseInsensitiveContains(query)
-            if isMatch {
-                let box = o.boundingBox
-                let relX = (box.origin.x + box.size.width / 2.0) * wb.w
-                let relY = (1.0 - box.origin.y - box.size.height / 2.0) * wb.h
-                let deskX = wb.x + relX
-                let deskY = wb.y + relY
-                let bounds = ElementBounds(
-                    x: wb.x + box.origin.x * wb.w,
-                    y: wb.y + (1.0 - box.origin.y - box.size.height) * wb.h,
-                    width: box.size.width * wb.w,
-                    height: box.size.height * wb.h
-                )
-                bestMatch = TextMatchResult(text: str, desktopX: deskX, desktopY: deskY, confidence: top.confidence, bounds: bounds)
-                break
-            }
+            let box = o.boundingBox
+            let relX = (box.origin.x + box.size.width / 2.0) * wb.w
+            let relY = (1.0 - box.origin.y - box.size.height / 2.0) * wb.h
+            let deskX = wb.x + relX
+            let deskY = wb.y + relY
+            let bounds = ElementBounds(
+                x: wb.x + box.origin.x * wb.w,
+                y: wb.y + (1.0 - box.origin.y - box.size.height) * wb.h,
+                width: box.size.width * wb.w,
+                height: box.size.height * wb.h
+            )
+            allMatches.append(OCRMatch(text: str, confidence: top.confidence, bounds: bounds, desktopX: deskX, desktopY: deskY))
         }
     }
     request.recognitionLanguages = ["zh-Hans", "en-US"]
     request.recognitionLevel = .accurate
     let handler = VNImageRequestHandler(url: url, options: [:])
     try? handler.perform([request])
-    return bestMatch
+
+    let result = OCRWindowFrame(windowID: windowId, pid: appPID, timestamp: Date().timeIntervalSince1970, matches: allMatches)
+    if let data = try? JSONEncoder().encode(result) {
+        try? data.write(to: cacheFile, options: .atomic)
+    }
+    return result
+}
+
+func findMatchesInWindow(appPID: pid_t, query: String, exact: Bool = false, minConfidence: Float = 0.0) -> [OCRMatch] {
+    guard let frame = ocrWindow(appPID: appPID) else { return [] }
+    return frame.matches.filter { match in
+        guard match.confidence >= minConfidence else { return false }
+        return exact ? (match.text.caseInsensitiveCompare(query) == .orderedSame)
+                     : match.text.localizedCaseInsensitiveContains(query)
+    }
+}
+
+func findTextInWindow(appPID: pid_t, query: String, exact: Bool = false) -> TextMatchResult? {
+    let matches = findMatchesInWindow(appPID: appPID, query: query, exact: exact)
+    guard let first = matches.first else { return nil }
+    return TextMatchResult(text: first.text, desktopX: first.desktopX, desktopY: first.desktopY, confidence: first.confidence, bounds: first.bounds)
 }
 
 // MARK: - Diff Computation
@@ -921,7 +1009,7 @@ func performPaste(text: String, targetPID: pid_t) -> Bool {
     guard pb.setString(text, forType: .string) else { return false }
     ownedChangeCount = pb.changeCount
     let pressSuccess = performKeyPress(key: "v", targetPID: targetPID, explicitModifiers: .maskCommand)
-    usleep(400000) // Dispatch wait only; target consumption is not yet verified.
+    usleep(40000) // 40ms dispatch wait (down from 400ms)
 
     return pressSuccess
 }
@@ -973,23 +1061,77 @@ func performTypeText(_ text: String, targetPID: pid_t? = nil, pressReturn: Bool 
     return true
 }
 
+func getFocusedUIElement(for pid: pid_t) -> AXUIElement? {
+    let axApp = safeAXApplication(pid)
+    var focused: AnyObject?
+    guard AXUIElementCopyAttributeValue(axApp, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+          let elem = focused else { return nil }
+    return (elem as! AXUIElement)
+}
+
 func performNavigate(app: NSRunningApplication, url: String) -> Bool {
-    app.activate()
-    usleep(100000)
+    let pid = app.processIdentifier
+    if !app.isActive {
+        app.activate()
+        usleep(80000)
+    }
     // Cmd + L focuses address bar
-    guard performKeyPress(key: "l", targetPID: app.processIdentifier, explicitModifiers: .maskCommand) else {
+    guard performKeyPress(key: "l", targetPID: pid, explicitModifiers: .maskCommand) else {
         return false
     }
-    usleep(80000)
-    // Paste URL
-    guard performPaste(text: url, targetPID: app.processIdentifier) else {
-        return false
+
+    // State-based wait: wait up to 300ms for focused element to be a text field / combo box / omnibox
+    let focusDeadline = ProcessInfo.processInfo.systemUptime + 0.3
+    var omnibox: AXUIElement? = nil
+    while ProcessInfo.processInfo.systemUptime < focusDeadline {
+        if let focused = getFocusedUIElement(for: pid) {
+            var roleVal: AnyObject?
+            if AXUIElementCopyAttributeValue(focused, kAXRoleAttribute as CFString, &roleVal) == .success,
+               let role = roleVal as? String {
+                if role == "AXTextField" || role == "AXComboBox" || role == "AXSearchField" {
+                    omnibox = focused
+                    break
+                }
+            }
+        }
+        usleep(20000)
     }
-    usleep(80000)
+
+    // Try set_value first if omnibox found; fall back to paste
+    var textInjected = false
+    if let box = omnibox {
+        if AXUIElementSetAttributeValue(box, kAXValueAttribute as CFString, url as CFTypeRef) == .success {
+            var checkVal: AnyObject?
+            if AXUIElementCopyAttributeValue(box, kAXValueAttribute as CFString, &checkVal) == .success,
+               let curStr = checkVal as? String, curStr.contains(url) {
+                textInjected = true
+            }
+        }
+    }
+    if !textInjected {
+        guard performPaste(text: url, targetPID: pid) else { return false }
+    }
+
+    // State-based check: verify omnibox has received the URL text
+    if let box = omnibox {
+        let valueDeadline = ProcessInfo.processInfo.systemUptime + 0.25
+        while ProcessInfo.processInfo.systemUptime < valueDeadline {
+            var val: AnyObject?
+            if AXUIElementCopyAttributeValue(box, kAXValueAttribute as CFString, &val) == .success,
+               let str = val as? String, !str.isEmpty {
+                break
+            }
+            usleep(20000)
+        }
+    } else {
+        usleep(40000)
+    }
+
     // Commit navigation with Return
-    guard performKeyPress(key: "return", targetPID: app.processIdentifier) else {
+    guard performKeyPress(key: "return", targetPID: pid) else {
         return false
     }
+    invalidateOCRCache(for: nil)
     return true
 }
 
@@ -1085,6 +1227,8 @@ func validateBatch(_ actions: [ActionItem]) -> (Int, String)? {
             guard let key = item.key, parseKeyAndModifiers(key) != nil else { return fail("Unsupported or missing key") }
         case "navigate":
             guard let url = item.url, !url.isEmpty else { return fail("url required") }
+        case "scroll":
+            break
         case "type_text", "typetext", "type":
             if item.text == nil && item.value == nil { return fail("text required") }
         case "paste", "click_text", "clicktext", "wait_text", "waitfortext":
@@ -1122,6 +1266,7 @@ func printUsage() {
       send-chat --app <name> --message <text> [--new-chat] Atomically send message in chat app
       find-text --app <name> --text <query>     Locate text in window via Vision OCR
       click-text --app <name> --text <query>    Locate and click text in window via Vision OCR
+      scroll --app <name> [--direction down|up|left|right] [--amount lines] Scroll window contents
       batch --app <name> --actions <json>       Execute a sequence of actions with strict fail-fast semantics
     """
     fputs(usage + "\n", stderr)
@@ -1278,45 +1423,49 @@ func main() {
             outputJSON(GenericResponse(success: false, error: "No unambiguous window scope", code: "WINDOW_UNAVAILABLE"))
             exit(1)
         }
-        let axStarted = ProcessInfo.processInfo.systemUptime
-        var collector = TreeCollector()
-        if let raw = cliOption("--max-nodes"), let customMax = Int(raw), customMax > 0 {
-            collector.maxNodes = customMax
-        }
-        collector.compact = compactMode
-        collector.collect(element: focusedWindow)
         var webAXStatus = "not_requested"
         let prepareStarted = ProcessInfo.processInfo.systemUptime
         if cliOption("--prepare-web") == "true" {
             let supported = ["com.microsoft.edgemac", "com.google.Chrome", "org.chromium.Chromium", "com.brave.Browser"]
             if !supported.contains(runningApp.bundleIdentifier ?? "") {
                 webAXStatus = "unsupported_app"
-            } else if collector.hasWebArea {
-                webAXStatus = "ready"
             } else {
-                let axApp = safeAXApplication(pid)
-                let result = AXUIElementSetAttributeValue(axApp, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
-                webAXStatus = result == .success ? "timeout" : "attribute_rejected"
-                if result == .success {
-                    let deadline = ProcessInfo.processInfo.systemUptime + 1.0
-                    repeat {
-                        usleep(100000)
-                        collector = TreeCollector()
-                        if let raw = cliOption("--max-nodes"), let customMax = Int(raw), customMax > 0 {
-                            collector.maxNodes = customMax
-                        }
-                        collector.compact = compactMode
-                        collector.collect(element: focusedWindow)
-                        if collector.hasWebArea { webAXStatus = "ready"; break }
-                    } while ProcessInfo.processInfo.systemUptime < deadline
+                if probeHasWebArea(element: focusedWindow) {
+                    webAXStatus = "ready"
+                } else {
+                    let axApp = safeAXApplication(pid)
+                    let result = AXUIElementSetAttributeValue(axApp, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+                    webAXStatus = result == .success ? "timeout" : "attribute_rejected"
+                    if result == .success {
+                        let deadline = ProcessInfo.processInfo.systemUptime + 1.0
+                        repeat {
+                            usleep(80000)
+                            if probeHasWebArea(element: focusedWindow) {
+                                webAXStatus = "ready"
+                                break
+                            }
+                        } while ProcessInfo.processInfo.systemUptime < deadline
+                    }
                 }
             }
         }
         let prepareMs = (ProcessInfo.processInfo.systemUptime - prepareStarted) * 1000
+
+        // Perform EXACTLY ONE full collection!
+        let axStarted = ProcessInfo.processInfo.systemUptime
+        let collector = TreeCollector()
+        if let raw = cliOption("--max-nodes"), let customMax = Int(raw), customMax > 0 {
+            collector.maxNodes = customMax
+        }
+        collector.compact = compactMode
+        collector.collect(element: focusedWindow)
         let axFinished = ProcessInfo.processInfo.systemUptime
+        let axCollectionMs = (axFinished - axStarted) * 1000
+
         let snapshot = Snapshot(id: UUID().uuidString, session: sessionID, pid: pid, launchedAt: launch,
                                 windowID: scopeID, bounds: scopeBounds, createdAt: Date().timeIntervalSince1970,
-                                elements: collector.elements)
+                                elements: collector.elements,
+                                maxNodes: collector.maxNodes, maxDepth: 20, isTruncated: collector.isTruncated)
         do {
             try JSONEncoder().encode(snapshot).write(to: snapshotURL(snapshot.id)!, options: .atomic)
         } catch {
@@ -1358,7 +1507,7 @@ func main() {
             windowId: scopeID, windowBounds: scopeBounds, text: fullText, diff: diffText,
             screenshotUrl: screenshotUrl, elementCount: collector.elements.count,
             elements: collector.elements, snapshotId: snapshot.id, sessionId: sessionID,
-            timingsMs: ["axCollection": (axFinished - axStarted) * 1000,
+            timingsMs: ["axCollection": axCollectionMs,
                         "capture": (captureFinished - captureStarted) * 1000,
                         "webPreparation": prepareMs,
                         "stateTotal": (ProcessInfo.processInfo.systemUptime - stateStarted) * 1000],
@@ -1568,6 +1717,7 @@ func main() {
         var appName: String? = nil
         var queryText: String? = nil
         var exact = false
+        var minConf: Float = 0.0
         var i = 2
         while i < args.count {
             if args[i] == "--app", i + 1 < args.count {
@@ -1579,6 +1729,9 @@ func main() {
             } else if args[i] == "--exact" {
                 exact = true
                 i += 1
+            } else if args[i] == "--min-confidence", i + 1 < args.count {
+                minConf = Float(args[i + 1]) ?? 0.0
+                i += 2
             } else {
                 i += 1
             }
@@ -1593,11 +1746,16 @@ func main() {
             outputJSON(res)
             exit(2)
         }
-        if let match = findTextInWindow(appPID: runningApp.processIdentifier, query: query, exact: exact) {
-            let res = GenericResponse(success: true, app: target, foundText: match.text, desktopX: match.desktopX, desktopY: match.desktopY)
+        let matches = findMatchesInWindow(appPID: runningApp.processIdentifier, query: query, exact: exact, minConfidence: minConf)
+        if !matches.isEmpty {
+            let best = matches.first!
+            let res = GenericResponse(success: true, app: target, foundText: best.text,
+                                      desktopX: best.desktopX, desktopY: best.desktopY,
+                                      confidence: best.confidence, bounds: best.bounds,
+                                      matchCount: matches.count, matches: matches)
             outputJSON(res)
         } else {
-            let res = GenericResponse(success: false, error: "Text '\(query)' not found in window of '\(target)'", app: target)
+            let res = GenericResponse(success: false, error: "Text '\(query)' not found in window of '\(target)'", app: target, matchCount: 0, matches: [])
             outputJSON(res)
             exit(1)
         }
@@ -1606,6 +1764,8 @@ func main() {
         var appName: String? = nil
         var queryText: String? = nil
         var exact = false
+        var occurrence: Int? = nil
+        var minConf: Float = 0.0
         var i = 2
         while i < args.count {
             if args[i] == "--app", i + 1 < args.count {
@@ -1617,6 +1777,12 @@ func main() {
             } else if args[i] == "--exact" {
                 exact = true
                 i += 1
+            } else if args[i] == "--occurrence", i + 1 < args.count {
+                occurrence = Int(args[i + 1])
+                i += 2
+            } else if args[i] == "--min-confidence", i + 1 < args.count {
+                minConf = Float(args[i + 1]) ?? 0.0
+                i += 2
             } else {
                 i += 1
             }
@@ -1633,18 +1799,41 @@ func main() {
         }
         if !runningApp.isActive {
             runningApp.activate()
-            usleep(120000)
+            usleep(80000)
         }
-        if let match = findTextInWindow(appPID: runningApp.processIdentifier, query: query, exact: exact) {
-            let ok = postMouseClick(at: CGPoint(x: match.desktopX, y: match.desktopY))
-            let res = GenericResponse(success: ok, app: target, foundText: match.text, desktopX: match.desktopX, desktopY: match.desktopY)
-            outputJSON(res)
-            if !ok { exit(1) }
-        } else {
-            let res = GenericResponse(success: false, error: "Text '\(query)' not found in window of '\(target)'", app: target)
+        let matches = findMatchesInWindow(appPID: runningApp.processIdentifier, query: query, exact: exact, minConfidence: minConf)
+        if matches.isEmpty {
+            let res = GenericResponse(success: false, error: "Text '\(query)' not found in window of '\(target)'", app: target, code: "TEXT_NOT_FOUND")
             outputJSON(res)
             exit(1)
         }
+
+        let targetMatch: OCRMatch
+        if let occ = occurrence {
+            guard occ >= 1 && occ <= matches.count else {
+                let res = GenericResponse(success: false, error: "Occurrence \(occ) out of bounds (\(matches.count) matches found for '\(query)')", app: target, code: "OUT_OF_BOUNDS", matchCount: matches.count)
+                outputJSON(res)
+                exit(1)
+            }
+            targetMatch = matches[occ - 1]
+        } else if matches.count > 1 && !exact {
+            let res = GenericResponse(success: false, error: "Ambiguous text '\(query)': found \(matches.count) matches. Specify --occurrence <1..N> or --exact to disambiguate.", app: target, code: "AMBIGUOUS_TEXT", matchCount: matches.count, matches: matches)
+            outputJSON(res)
+            exit(1)
+        } else {
+            targetMatch = matches.first!
+        }
+
+        let ok = postMouseClick(at: CGPoint(x: targetMatch.desktopX, y: targetMatch.desktopY))
+        invalidateOCRCache(for: nil)
+        var res = GenericResponse(success: ok, action: "click-text", app: target, status: ok ? "dispatched" : "failed")
+        res.foundText = targetMatch.text
+        res.desktopX = targetMatch.desktopX
+        res.desktopY = targetMatch.desktopY
+        res.confidence = targetMatch.confidence
+        res.bounds = targetMatch.bounds
+        outputJSON(res)
+        if !ok { exit(1) }
 
     case "batch":
         var appName: String? = nil
@@ -1670,7 +1859,7 @@ func main() {
             outputJSON(res)
             exit(2)
         }
-        let allowedKeys: Set<String> = ["action", "element", "value", "text", "message", "key", "url", "x", "y", "waitMs", "exact", "newChat", "pressReturn"]
+        let allowedKeys: Set<String> = ["action", "element", "value", "text", "message", "key", "url", "x", "y", "waitMs", "exact", "newChat", "pressReturn", "modifiers", "direction", "amount", "occurrence", "minConfidence"]
         guard let objects = (try? JSONSerialization.jsonObject(with: jsonData)) as? [[String: Any]],
               objects.allSatisfy({ Set($0.keys).isSubset(of: allowedKeys) }) else {
             outputJSON(GenericResponse(success: false, error: "Invalid action array or unknown action parameter", executed: 0, code: "INVALID_ARGUMENT", status: "rejected"))
@@ -1750,11 +1939,50 @@ func main() {
                     failureDetails = (stepNum, "Missing required parameter 'key' for action 'press_key'")
                     break
                 }
-                let ok = performKeyPress(key: key, targetPID: runningApp.processIdentifier)
+                var modFlags: CGEventFlags = []
+                if let mods = item.modifiers {
+                    for m in mods {
+                        switch m.lowercased() {
+                        case "cmd", "command": modFlags.insert(.maskCommand)
+                        case "ctrl", "control": modFlags.insert(.maskControl)
+                        case "alt", "option", "opt": modFlags.insert(.maskAlternate)
+                        case "shift": modFlags.insert(.maskShift)
+                        default: break
+                        }
+                    }
+                }
+                let ok = performKeyPress(key: key, targetPID: runningApp.processIdentifier, explicitModifiers: modFlags)
                 if !ok {
                     failureDetails = (stepNum, "Failed to press key '\(key)': unknown key or event error")
                     break
                 }
+
+            case "scroll":
+                let direction = item.direction?.lowercased() ?? "down"
+                let amount = item.amount ?? 5
+                let bounds = getElementBounds(focusedScope(runningApp.processIdentifier) ?? safeAXApplication(runningApp.processIdentifier))
+                let bX = bounds?.x ?? 0.0
+                let bY = bounds?.y ?? 0.0
+                let bW = bounds?.width ?? 0.0
+                let bH = bounds?.height ?? 0.0
+                let scrollPt = CGPoint(x: item.x ?? (bX + bW / 2.0), y: item.y ?? (bY + bH / 2.0))
+                var wheel1: Int32 = 0
+                var wheel2: Int32 = 0
+                let amt = Int32(max(1, amount))
+                switch direction {
+                case "up": wheel1 = amt
+                case "down": wheel1 = -amt
+                case "left": wheel2 = amt
+                case "right": wheel2 = -amt
+                default: wheel1 = -amt
+                }
+                guard let scrollEvent = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: wheel2 != 0 ? 2 : 1, wheel1: wheel1, wheel2: wheel2, wheel3: 0) else {
+                    failureDetails = (stepNum, "Failed to create scroll event")
+                    break
+                }
+                scrollEvent.location = scrollPt
+                scrollEvent.post(tap: .cghidEventTap)
+                usleep(30000)
 
             case "navigate":
                 guard let url = item.url, !url.isEmpty else {
@@ -1890,6 +2118,83 @@ func main() {
             )
             outputJSON(res)
         }
+
+    case "scroll":
+        var appName: String? = nil
+        var direction = "down"
+        var amount: Int = 5
+        var targetX: Double? = nil
+        var targetY: Double? = nil
+        var i = 2
+        while i < args.count {
+            if args[i] == "--app", i + 1 < args.count {
+                appName = args[i + 1]
+                i += 2
+            } else if args[i] == "--direction", i + 1 < args.count {
+                direction = args[i + 1].lowercased()
+                i += 2
+            } else if args[i] == "--amount", i + 1 < args.count {
+                amount = Int(args[i + 1]) ?? 5
+                i += 2
+            } else if args[i] == "--x", i + 1 < args.count {
+                targetX = Double(args[i + 1])
+                i += 2
+            } else if args[i] == "--y", i + 1 < args.count {
+                targetY = Double(args[i + 1])
+                i += 2
+            } else {
+                i += 1
+            }
+        }
+        guard let target = appName, let runningApp = findRunningApp(named: target) else {
+            let res = GenericResponse(success: false, error: "--app is required and must be running")
+            outputJSON(res)
+            exit(2)
+        }
+        let pid = runningApp.processIdentifier
+        guard let scope = focusedScope(pid), let bounds = getElementBounds(scope) else {
+            let res = GenericResponse(success: false, error: "No window bounds found for '\(target)'", code: "WINDOW_UNAVAILABLE")
+            outputJSON(res)
+            exit(1)
+        }
+
+        if !runningApp.isActive {
+            runningApp.activate()
+            usleep(60000)
+        }
+
+        let scrollPt = CGPoint(
+            x: targetX ?? (bounds.x + bounds.width / 2.0),
+            y: targetY ?? (bounds.y + bounds.height / 2.0)
+        )
+
+        var wheel1: Int32 = 0
+        var wheel2: Int32 = 0
+        let amt = Int32(max(1, amount))
+        switch direction {
+        case "up": wheel1 = amt
+        case "down": wheel1 = -amt
+        case "left": wheel2 = amt
+        case "right": wheel2 = -amt
+        default: wheel1 = -amt
+        }
+
+        guard let scrollEvent = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: wheel2 != 0 ? 2 : 1, wheel1: wheel1, wheel2: wheel2, wheel3: 0) else {
+            let res = GenericResponse(success: false, error: "Failed to construct scroll event", code: "ACTION_FAILED")
+            outputJSON(res)
+            exit(1)
+        }
+        scrollEvent.location = scrollPt
+        scrollEvent.post(tap: .cghidEventTap)
+        usleep(30000)
+
+        invalidateOCRCache(for: nil)
+        var res = GenericResponse(success: true, action: "scroll", app: target, status: "dispatched")
+        res.direction = direction
+        res.amount = Int(amt)
+        res.x = Double(scrollPt.x)
+        res.y = Double(scrollPt.y)
+        outputJSON(res)
 
     default:
         printUsage()
