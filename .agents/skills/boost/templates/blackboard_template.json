@@ -1,0 +1,19 @@
+{
+  "version": "2.1.0",
+  "created_at": 0.0,
+  "updated_at": 0.0,
+  "task": {
+    "title": "",
+    "status": "in_progress",
+    "token_budget": 30,
+    "max_hierarchy_depth": 1,
+    "active_mode": "peer_mesh",
+    "completed_at": null,
+    "summary": null,
+    "abort_reason": null
+  },
+  "tasks": {},
+  "shared_facts": {},
+  "signals": [],
+  "artifacts": []
+}

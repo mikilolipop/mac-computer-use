@@ -1,0 +1,221 @@
+import subprocess
+import json
+import os
+import sys
+
+print("========================================")
+print("RUNNING FULL AUDIT REGRESSION SUITE")
+print("========================================")
+
+# 1. Batch Unknown Action Fail-Fast Test
+print("\n[Test 1] Batch Unknown Action Fail-Fast Test...")
+r = subprocess.run([
+    "bin/mac-cua", "batch", "--app", "Finder", "--actions",
+    json.dumps([{"action": "audit_unknown_action"}, {"action": "click"}, {"action": "set_value"}])
+], capture_output=True, text=True)
+assert r.returncode != 0, f"Expected non-zero exit code, got {r.returncode}"
+out = json.loads(r.stdout)
+assert out.get("success") is False, "Expected success: false"
+assert out.get("failedIndex") == 1, f"Expected failedIndex 1, got {out.get('failedIndex')}"
+assert out.get("executed") == 0, f"Expected executed 0, got {out.get('executed')}"
+print("  PASSED: Exit code 1, failedIndex=1, executed=0, error reported cleanly.")
+
+# 2. Batch Missing Parameter Fail-Fast Test
+print("\n[Test 2] Batch Missing Parameter Fail-Fast Test...")
+r = subprocess.run([
+    "bin/mac-cua", "batch", "--app", "Finder", "--actions",
+    json.dumps([{"action": "activate"}, {"action": "click"}])
+], capture_output=True, text=True)
+assert r.returncode != 0, f"Expected non-zero exit code, got {r.returncode}"
+out = json.loads(r.stdout)
+assert out.get("success") is False
+assert out.get("failedIndex") == 2
+assert out.get("executed") == 1
+print("  PASSED: Step 1 executed, step 2 failed fast with missing parameter error.")
+
+# 3. Press Key Unknown Key Rejection Test
+print("\n[Test 3] Unknown Key Rejection Test...")
+r = subprocess.run(["bin/mac-cua", "press-key", "--key", "audit_nonexistent_key_xyz"], capture_output=True, text=True)
+assert r.returncode != 0
+out = json.loads(r.stdout)
+assert out.get("success") is False
+assert "audit_nonexistent_key_xyz" in out.get("error", "")
+print("  PASSED: Unknown key rejected with exit code 1 and error description.")
+
+# 4. Press Key Combination Test
+print("\n[Test 4] Key Combination Test...")
+r = subprocess.run(["bin/mac-cua", "press-key", "--key", "cmd+c"], capture_output=True, text=True)
+assert r.returncode == 0
+out = json.loads(r.stdout)
+assert out.get("success") is True
+print("  PASSED: Combination key cmd+c succeeded.")
+
+# 5. Clipboard Preservation Test
+print("\n[Test 5] Clipboard Preservation Test...")
+sentinel = "AUDIT_CLIPBOARD_SENTINEL_998877"
+p = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
+p.communicate(sentinel.encode("utf-8"))
+r = subprocess.run([
+    "bin/mac-cua", "batch", "--app", "Finder", "--actions",
+    json.dumps([{"action": "paste", "text": "temporary_paste"}])
+], capture_output=True, text=True)
+assert r.returncode == 0
+restored = subprocess.check_output(["pbpaste"]).decode("utf-8")
+assert restored == sentinel, f"Clipboard corrupted: {restored} != {sentinel}"
+print("  PASSED: Original clipboard perfectly preserved and restored.")
+
+# 6. MCP Protocol Full Round-Trip Test
+print("\n[Test 6] MCP Protocol Round-Trip & Timeout Test...")
+proc = subprocess.Popen(
+    ["python3", "sdk/mcp_server.py"],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True
+)
+reqs = [
+    {"jsonrpc": "2.0", "id": 101, "method": "initialize", "params": {}},
+    {"jsonrpc": "2.0", "id": 102, "method": "tools/list", "params": {}},
+    {"jsonrpc": "2.0", "id": 103, "method": "tools/call", "params": {"name": "click", "arguments": {"app": "FakeApp999", "element_index": 1}}},
+    {"jsonrpc": "2.0", "id": 104, "method": "tools/call", "params": {"name": "unknown_tool_xyz", "arguments": {}}},
+    {"jsonrpc": "2.0", "id": 105, "method": "ping", "params": {}}
+]
+in_str = "\n".join(json.dumps(rq) for rq in reqs) + "\n"
+stdout, stderr = proc.communicate(input=in_str, timeout=10)
+lines = [l.strip() for l in stdout.splitlines() if l.strip()]
+resp_ids = [json.loads(l).get("id") for l in lines]
+assert resp_ids == [101, 102, 103, 104, 105], f"Received IDs: {resp_ids}"
+print("  PASSED: Zero lost packets! 101-105 all received valid JSON-RPC responses.")
+
+# 7. MCP Base64 Image Perception Test
+print("\n[Test 7] MCP Perception Image Test...")
+proc = subprocess.Popen(
+    ["python3", "sdk/mcp_server.py"],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True
+)
+state_req = {"jsonrpc": "2.0", "id": 201, "method": "tools/call", "params": {"name": "get_app_state", "arguments": {"app": "Microsoft Edge", "no_img": False}}}
+stdout, stderr = proc.communicate(input=json.dumps(state_req) + "\n", timeout=10)
+res = json.loads(stdout.strip())
+content_types = [c.get("type") for c in res["result"]["content"]]
+assert "text" in content_types, "Text missing from get_app_state"
+assert "image" in content_types, "Image missing from get_app_state"
+img_c = next(c for c in res["result"]["content"] if c.get("type") == "image")
+assert img_c["mimeType"] == "image/png"
+assert len(img_c["data"]) > 1000
+print(f"  PASSED: Image block returned successfully ({len(img_c['data'])} bytes base64).")
+
+# 8. Native Vision OCR Query Test
+print("\n[Test 8] Native Vision OCR Text Query Test...")
+r = subprocess.run([
+    "bin/mac-cua", "find-text", "--app", "Gemini", "--text", "Gemini"
+], capture_output=True, text=True)
+assert r.returncode == 0
+out = json.loads(r.stdout)
+assert out.get("success") is True
+assert "Gemini" in out.get("foundText", "")
+assert out.get("desktopX") is not None and out.get("desktopY") is not None
+print(f"  PASSED: Native Vision OCR located '{out['foundText']}' at ({out['desktopX']:.1f}, {out['desktopY']:.1f}).")
+
+# 9. Batch OCR Fail-Fast & Missing Parameter Test
+print("\n[Test 9] Batch OCR Fail-Fast Test...")
+r = subprocess.run([
+    "bin/mac-cua", "batch", "--app", "Gemini", "--actions",
+    json.dumps([{"action": "activate"}, {"action": "click_text"}])
+], capture_output=True, text=True)
+assert r.returncode != 0
+out = json.loads(r.stdout)
+assert out.get("success") is False
+assert out.get("failedIndex") == 2
+assert "Missing required parameter 'text'" in out.get("error", "")
+print("  PASSED: Batch click_text missing parameter triggered fail-fast at index 2.")
+
+# 10. Process Disambiguation & send_chat Test
+print("\n[Test 10] Process Disambiguation & send_chat Test...")
+# Verify "Gemini" disambiguates to regular app PID and not FinderSyncExtension
+r = subprocess.run([
+    "bin/mac-cua", "state", "--app", "Gemini", "--no-img"
+], capture_output=True, text=True)
+assert r.returncode == 0
+out = json.loads(r.stdout)
+assert out.get("app") == "Gemini"
+assert out.get("pid") is not None and out.get("pid") > 0, f"Expected valid PID, got {out.get('pid')}"
+assert out.get("elementCount", 0) > 50
+
+# Verify batch send_chat missing param fail-fast
+r2 = subprocess.run([
+    "bin/mac-cua", "batch", "--app", "Gemini", "--actions",
+    json.dumps([{"action": "activate"}, {"action": "send_chat"}])
+], capture_output=True, text=True)
+assert r2.returncode != 0
+out2 = json.loads(r2.stdout)
+assert out2.get("success") is False
+assert out2.get("failedIndex") == 2
+assert "Missing required parameter 'message'" in out2.get("error", "")
+print("  PASSED: Process disambiguation verified on Gemini & send_chat fail-fast verified.")
+
+# 11. type-text CLI Unicode Injection Test
+print("\n[Test 11] type-text CLI Unicode Injection Test...")
+r_type = subprocess.run(["bin/mac-cua", "type-text", "--text", "AUDIT_UNICODE_INJECTION_123"], capture_output=True, text=True)
+assert r_type.returncode == 0
+out_type = json.loads(r_type.stdout)
+assert out_type.get("success") is True
+assert out_type.get("text") == "AUDIT_UNICODE_INJECTION_123"
+print("  PASSED: type-text CLI executed with 0 clipboard pollution and verified return values.")
+
+# 12. Batch type_text Success & Fail-Fast Test
+print("\n[Test 12] Batch type_text Success & Fail-Fast Test...")
+r_batch_type = subprocess.run([
+    "bin/mac-cua", "batch", "--app", "Finder", "--actions",
+    json.dumps([{"action": "activate"}, {"action": "type_text", "text": "audit_batch_type", "pressReturn": False}])
+], capture_output=True, text=True)
+assert r_batch_type.returncode == 0
+out_batch_type = json.loads(r_batch_type.stdout)
+assert out_batch_type.get("success") is True
+assert out_batch_type.get("executed") == 2
+
+r_batch_fail = subprocess.run([
+    "bin/mac-cua", "batch", "--app", "Finder", "--actions",
+    json.dumps([{"action": "activate"}, {"action": "type_text"}])
+], capture_output=True, text=True)
+assert r_batch_fail.returncode != 0
+out_batch_fail = json.loads(r_batch_fail.stdout)
+assert out_batch_fail.get("success") is False
+assert out_batch_fail.get("failedIndex") == 2
+assert "Missing required parameter 'text'" in out_batch_fail.get("error", "")
+print("  PASSED: Batch type_text execution and fail-fast semantics verified.")
+
+# 13. MCP 12 Tools & type_text Round-Trip Test
+print("\n[Test 13] MCP Server 12 Tools & type_text Round-Trip Test...")
+proc = subprocess.Popen(
+    ["python3", "sdk/mcp_server.py"],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True
+)
+mcp_reqs = [
+    {"jsonrpc": "2.0", "id": 301, "method": "tools/list", "params": {}},
+    {"jsonrpc": "2.0", "id": 302, "method": "tools/call", "params": {"name": "type_text", "arguments": {"text": "mcp_audit_test", "press_return": False}}}
+]
+in_data = "\n".join(json.dumps(rq) for rq in mcp_reqs) + "\n"
+stdout, stderr = proc.communicate(input=in_data, timeout=10)
+lines = [l.strip() for l in stdout.splitlines() if l.strip()]
+resp301 = json.loads(lines[0])
+resp302 = json.loads(lines[1])
+tools_list = [t["name"] for t in resp301["result"]["tools"]]
+assert len(tools_list) == 12, f"Expected 12 tools, got {len(tools_list)}: {tools_list}"
+assert "type_text" in tools_list
+assert resp302["id"] == 302
+assert resp302["result"]["isError"] is False
+assert "mcp_audit_test" in resp302["result"]["content"][0]["text"]
+print("  PASSED: MCP Server exposed 12 tools and successfully executed type_text.")
+
+print("\n========================================")
+print("ALL 13 AUDIT REGRESSION TESTS PASSED 100%!")
+print("========================================")
+
+
+

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "mac-computer-use": {
+      "command": "/Users/dilyar/Documents/Dilyar/关键技术/尝试复刻computer-use/bin/mac-cua-mcp",
+      "args": [],
+      "cwd": "/Users/dilyar/Documents/Dilyar/关键技术/尝试复刻computer-use"
+    }
+  }
+}

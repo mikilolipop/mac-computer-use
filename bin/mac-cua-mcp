@@ -1,0 +1,10 @@
+#!/bin/sh
+# Prefer this project's image-capable environment; keep the standard-library fallback.
+set -eu
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+PYTHON_BIN="${MAC_CUA_PYTHON:-$ROOT_DIR/.venv/bin/python}"
+if [ ! -x "$PYTHON_BIN" ]; then
+  PYTHON_BIN=python3
+fi
+cd "$ROOT_DIR"
+exec "$PYTHON_BIN" -m sdk.mcp_server

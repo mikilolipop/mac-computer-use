@@ -1,0 +1,2 @@
+# Optional image annotation; the core SDK/MCP use the Python standard library.
+Pillow>=10,<13

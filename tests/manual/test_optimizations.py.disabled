@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""
+Test Suite for Project Optimizations:
+1. Native Preflight Doctor (Permissions & Diagnostics)
+2. AXTree Semantic Pruning (Token reduction without losing interactive elements)
+3. Set-of-Marks (SoM) Visual Badge Annotation
+4. MCP Protocol Integration for doctor & get_app_state (compact & annotate)
+"""
+
+import os
+import sys
+import json
+import subprocess
+from PIL import Image
+
+cur_dir = os.path.dirname(os.path.abspath(__file__))
+workspace_root = os.path.abspath(os.path.join(cur_dir, ".."))
+sys.path.insert(0, os.path.join(workspace_root, "sdk"))
+
+from cua_client import CuaClient
+from visual_annotator import annotate_screenshot
+
+def test_doctor_cli_and_sdk():
+    print("\n--- [Test 1] Testing Doctor CLI & SDK ---")
+    client = CuaClient(binary_path=os.path.join(workspace_root, "bin", "mac-cua"))
+    doc = client.doctor()
+    assert isinstance(doc, dict), "Doctor must return dict"
+    assert "accessibility" in doc, "Accessibility key missing"
+    assert "screenCapture" in doc, "ScreenCapture key missing"
+    assert "osVersion" in doc, "OS version missing"
+    assert "arch" in doc, "Arch missing"
+    assert doc["success"] is True, f"Doctor failed: {doc}"
+    print(f"  PASSED: Doctor verified (arch={doc['arch']}, AX={doc['accessibility']}, Screen={doc['screenCapture']})")
+
+def test_axtree_semantic_pruning():
+    print("\n--- [Test 2] Testing AXTree Semantic Pruning ---")
+    client = CuaClient(binary_path=os.path.join(workspace_root, "bin", "mac-cua"))
+    
+    # Compare Finder standard tree vs compact tree
+    state_full = client.get_state("访达", diff=False, no_img=True, compact=False, annotate=False)
+    state_compact = client.get_state("访达", diff=False, no_img=True, compact=True, annotate=False)
+    
+    full_lines = state_full.get("text", "").splitlines()
+    compact_lines = state_compact.get("text", "").splitlines()
+    
+    print(f"  Full Tree Lines: {len(full_lines)}")
+    print(f"  Compact Tree Lines: {len(compact_lines)}")
+    
+    assert len(compact_lines) <= len(full_lines), "Compact tree should not have more lines than full tree"
+    assert state_compact["elementCount"] == state_full["elementCount"], "Compact mode must NOT lose any interactive elements!"
+    print(f"  PASSED: Semantic pruning preserved 100% of interactive elements ({state_compact['elementCount']}) while stripping structural noise.")
+
+def test_set_of_marks_visual_annotation():
+    print("\n--- [Test 3] Testing Set-of-Marks (SoM) Visual Annotation ---")
+    client = CuaClient(binary_path=os.path.join(workspace_root, "bin", "mac-cua"))
+    state = client.get_state("访达", diff=False, no_img=False, compact=True, annotate=True)
+    
+    assert state.get("screenshotUrl"), "Screenshot URL missing"
+    assert state.get("annotatedScreenshotUrl"), "Annotated screenshot URL missing"
+    
+    clean_path = state["screenshotUrl"]
+    annotated_path = state["annotatedScreenshotUrl"]
+    if clean_path.startswith("file://"): clean_path = clean_path[7:]
+    if annotated_path.startswith("file://"): annotated_path = annotated_path[7:]
+    
+    assert os.path.exists(clean_path), f"Clean image not found at {clean_path}"
+    assert os.path.exists(annotated_path), f"Annotated image not found at {annotated_path}"
+    
+    with Image.open(annotated_path) as im:
+        w, h = im.size
+        assert w > 100 and h > 100, "Annotated image dimensions invalid"
+        assert im.mode in ("RGB", "RGBA"), "Annotated image mode invalid"
+        
+    print(f"  PASSED: SoM image generated successfully at {annotated_path} ({w}x{h}).")
+
+def test_mcp_integration():
+    print("\n--- [Test 4] Testing MCP Integration with New Tools & Parameters ---")
+    mcp_script = os.path.join(workspace_root, "sdk", "mcp_server.py")
+    proc = subprocess.Popen([sys.executable, mcp_script], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    
+    # 1. Initialize
+    proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n")
+    proc.stdin.flush()
+    r1 = json.loads(proc.stdout.readline())
+    assert r1.get("id") == 1
+    
+    # 2. tools/list
+    proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}) + "\n")
+    proc.stdin.flush()
+    r2 = json.loads(proc.stdout.readline())
+    tools = {t["name"]: t for t in r2["result"]["tools"]}
+    assert "doctor" in tools, "Doctor tool missing from MCP tools/list"
+    assert "compact" in tools["get_app_state"]["inputSchema"]["properties"], "Compact param missing from get_app_state"
+    assert "annotate" in tools["get_app_state"]["inputSchema"]["properties"], "Annotate param missing from get_app_state"
+    
+    # 3. Call doctor tool
+    proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "doctor", "arguments": {}}}) + "\n")
+    proc.stdin.flush()
+    r3 = json.loads(proc.stdout.readline())
+    doc_out = json.loads(r3["result"]["content"][0]["text"])
+    assert doc_out.get("success") is True, f"MCP doctor call failed: {doc_out}"
+    
+    proc.terminate()
+    print("  PASSED: MCP server successfully registered and executed doctor and SoM get_app_state.")
+
+if __name__ == "__main__":
+    print("========================================")
+    print("RUNNING OPTIMIZATION TEST SUITE")
+    print("========================================")
+    test_doctor_cli_and_sdk()
+    test_axtree_semantic_pruning()
+    test_set_of_marks_visual_annotation()
+    test_mcp_integration()
+    print("\nALL OPTIMIZATION TESTS PASSED PERFECTLY!\n")

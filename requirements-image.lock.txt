@@ -1,0 +1,2 @@
+# Image runtime verified locally for the dynamic-page regression suite.
+Pillow==12.3.0

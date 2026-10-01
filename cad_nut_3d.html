@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Web CAD - 标准六角螺母 (ISO 4032 M10) 工程三维图纸</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", sans-serif;
+            background: #13171f;
+            color: #dcdfe4;
+            overflow: hidden;
+            width: 100vw;
+            height: 100vh;
+        }
+        #viewport {
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            left: 0;
+            top: 0;
+        }
+        .cad-header {
+            position: absolute;
+            top: 16px;
+            left: 20px;
+            z-index: 10;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            background: rgba(22, 27, 34, 0.9);
+            backdrop-filter: blur(12px);
+            padding: 10px 20px;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        }
+        .cad-logo {
+            font-size: 16px;
+            font-weight: 700;
+            color: #58a6ff;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .badge {
+            font-size: 11px;
+            background: #238636;
+            color: #fff;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-weight: 600;
+        }
+        .cad-toolbar {
+            display: flex;
+            gap: 8px;
+        }
+        .cad-btn {
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            color: #e6edf3;
+            padding: 6px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.2s ease;
+        }
+        .cad-btn:hover {
+            background: #1f6feb;
+            border-color: #388bfd;
+        }
+        .cad-btn.active {
+            background: #238636;
+            border-color: #2ea043;
+        }
+        .spec-panel {
+            position: absolute;
+            top: 16px;
+            right: 20px;
+            z-index: 10;
+            width: 320px;
+            background: rgba(22, 27, 34, 0.92);
+            backdrop-filter: blur(12px);
+            padding: 18px;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        }
+        .spec-panel h3 {
+            font-size: 15px;
+            color: #58a6ff;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .spec-row {
+            display: flex;
+            justify-content: space-between;
+            font-size: 13px;
+            padding: 5px 0;
+            color: #8b949e;
+        }
+        .spec-val {
+            color: #f0f6fc;
+            font-family: "SF Mono", Monaco, Consolas, monospace;
+            font-weight: 600;
+        }
+        .cad-title-block {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            z-index: 10;
+            background: rgba(22, 27, 34, 0.95);
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 12px 18px;
+            font-size: 12px;
+            color: #8b949e;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+        }
+        .cad-title-block table {
+            border-collapse: collapse;
+        }
+        .cad-title-block td {
+            padding: 4px 12px;
+            border: 1px solid #30363d;
+        }
+        .cad-title-block .bold {
+            color: #f0f6fc;
+            font-weight: 600;
+        }
+        .info-overlay {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            z-index: 10;
+            font-size: 12px;
+            color: #8b949e;
+            background: rgba(22, 27, 34, 0.85);
+            padding: 8px 14px;
+            border-radius: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+    </style>
+</head>
+<body>
+    <div id="viewport"></div>
+
+    <div class="cad-header">
+        <div class="cad-logo">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2">
+                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+            </svg>
+            WebCAD 3D Engine
+            <span class="badge">ISO 4032 / GB 6170</span>
+        </div>
+        <div class="cad-toolbar">
+            <button class="cad-btn active" id="btn-wireframe">CAD 结构线框 (W)</button>
+            <button class="cad-btn active" id="btn-rotate">自动旋转 (R)</button>
+            <button class="cad-btn" id="btn-dims">工程尺寸标注 (D)</button>
+            <button class="cad-btn" id="btn-reset">重置标准视角</button>
+        </div>
+    </div>
+
+    <div class="spec-panel">
+        <h3>
+            <span>标准 1 型六角螺母 (M10)</span>
+            <span style="font-size: 12px; color: #3fb950;">8 级淬火钢</span>
+        </h3>
+        <div class="spec-row">
+            <span>螺纹公称大径 (d)</span>
+            <span class="spec-val">M10 × 1.5 mm</span>
+        </div>
+        <div class="spec-row">
+            <span>对边距 (S)</span>
+            <span class="spec-val">16.00 mm (±0.2)</span>
+        </div>
+        <div class="spec-row">
+            <span>对角距 (e min)</span>
+            <span class="spec-val">17.77 mm</span>
+        </div>
+        <div class="spec-row">
+            <span>螺母厚度 (m)</span>
+            <span class="spec-val">8.40 mm (h12)</span>
+        </div>
+        <div class="spec-row">
+            <span>两端倒角角度 (θ)</span>
+            <span class="spec-val">30° 双倒角面</span>
+        </div>
+        <div class="spec-row">
+            <span>螺纹底孔小径 (D1)</span>
+            <span class="spec-val">Φ 8.38 mm</span>
+        </div>
+        <div class="spec-row">
+            <span>材料与热处理</span>
+            <span class="spec-val" style="color: #58a6ff;">45# 淬火 镀铬发黑</span>
+        </div>
+    </div>
+
+    <div class="cad-title-block">
+        <table>
+            <tr>
+                <td>零件名称</td>
+                <td class="bold">1型六角螺母 (Hex Nut)</td>
+                <td>设计标准</td>
+                <td class="bold">ISO 4032 / GB/T 6170</td>
+            </tr>
+            <tr>
+                <td>图纸编号</td>
+                <td class="bold">CAD-M10-HEX-001</td>
+                <td>渲染模式</td>
+                <td class="bold">PBR 物理金属材质 + 矢量特征线</td>
+            </tr>
+        </table>
+    </div>
+
+    <div class="info-overlay">
+        🖱️ 鼠标拖拽：360° 旋转视角 | 鼠标滚轮：缩放视距 | 键盘快捷键：W (线框) / R (旋转) / D (标注)
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <script>
+        // 1. 场景与相机
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x13171f);
+
+        const camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(22, 16, 24);
+        camera.lookAt(0, 0, 0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.shadowMap.enabled = true;
+        document.getElementById('viewport').appendChild(renderer.domElement);
+
+        // 2. 光照系统
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+        scene.add(ambientLight);
+
+        const dirLight1 = new THREE.DirectionalLight(0xffffff, 1.4);
+        dirLight1.position.set(20, 30, 20);
+        scene.add(dirLight1);
+
+        const dirLight2 = new THREE.DirectionalLight(0x58a6ff, 0.8);
+        dirLight2.position.set(-20, 20, -20);
+        scene.add(dirLight2);
+
+        const fillLight = new THREE.DirectionalLight(0xffffff, 0.5);
+        fillLight.position.set(0, -20, 0);
+        scene.add(fillLight);
+
+        // 3. CAD 基准网格与轴系
+        const grid = new THREE.GridHelper(40, 40, 0x30363d, 0x1f242c);
+        grid.position.y = -6;
+        scene.add(grid);
+
+        const axes = new THREE.AxesHelper(5);
+        axes.position.set(-14, -5.9, -14);
+        scene.add(axes);
+
+        // 4. 标准六角螺母 3D CAD 实体构建
+        const S = 16.0;                    // 对边距
+        const R_outer = S / Math.sqrt(3);   // 六边形外接圆半径 ~9.237
+        const height = 8.4;                // 厚度
+        const threadMajorR = 5.0;          // 螺纹大径 M10 -> 半径 5.0
+        const threadMinorR = 4.25;         // 螺纹小径 -> 半径 4.25
+
+        const nutGroup = new THREE.Group();
+        scene.add(nutGroup);
+
+        // 4.1 高精密拉丝合金材质
+        const bodyMat = new THREE.MeshStandardMaterial({
+            color: 0xbbc2ce,
+            metalness: 0.85,
+            roughness: 0.25
+        });
+
+        // 4.2 六角主体 (6棱柱)
+        const hexGeo = new THREE.CylinderGeometry(R_outer, R_outer, height - 1.2, 6);
+        const hexMesh = new THREE.Mesh(hexGeo, bodyMat);
+        nutGroup.add(hexMesh);
+
+        // 顶部倒角过渡体 (30° Chamfer)
+        const topChamferGeo = new THREE.CylinderGeometry(R_outer * 0.88, R_outer, 0.6, 6);
+        const topChamferMesh = new THREE.Mesh(topChamferGeo, bodyMat);
+        topChamferMesh.position.y = (height - 1.2) / 2 + 0.3;
+        nutGroup.add(topChamferMesh);
+
+        // 底部倒角过渡体
+        const botChamferGeo = new THREE.CylinderGeometry(R_outer, R_outer * 0.88, 0.6, 6);
+        const botChamferMesh = new THREE.Mesh(botChamferGeo, bodyMat);
+        botChamferMesh.position.y = -((height - 1.2) / 2 + 0.3);
+        nutGroup.add(botChamferMesh);
+
+        // 4.3 CAD 经典轮廓特征线 (Edges Highlight)
+        const edgeColor = 0x58a6ff;
+        const hexEdges = new THREE.LineSegments(
+            new THREE.EdgesGeometry(hexGeo),
+            new THREE.LineBasicMaterial({ color: edgeColor, linewidth: 2 })
+        );
+        nutGroup.add(hexEdges);
+
+        const topEdges = new THREE.LineSegments(
+            new THREE.EdgesGeometry(topChamferGeo),
+            new THREE.LineBasicMaterial({ color: edgeColor, linewidth: 2 })
+        );
+        topEdges.position.copy(topChamferMesh.position);
+        nutGroup.add(topEdges);
+
+        const botEdges = new THREE.LineSegments(
+            new THREE.EdgesGeometry(botChamferGeo),
+            new THREE.LineBasicMaterial({ color: edgeColor, linewidth: 2 })
+        );
+        botEdges.position.copy(botChamferMesh.position);
+        nutGroup.add(botEdges);
+
+        // 4.4 内孔与螺纹牙纹 (Concentric Bore & Internal Thread Rings)
+        const innerHoleMat = new THREE.MeshStandardMaterial({
+            color: 0x484f58,
+            metalness: 0.9,
+            roughness: 0.4,
+            side: THREE.BackSide
+        });
+        const innerHoleGeo = new THREE.CylinderGeometry(threadMajorR, threadMajorR, height + 0.1, 32, 1, true);
+        const innerHoleMesh = new THREE.Mesh(innerHoleGeo, innerHoleMat);
+        nutGroup.add(innerHoleMesh);
+
+        // 螺旋螺纹圈
+        const threadCount = 6;
+        for (let i = 0; i < threadCount; i++) {
+            const yPos = -height/2 + (i + 0.5) * (height / threadCount);
+            const ringGeo = new THREE.TorusGeometry(threadMinorR, 0.35, 8, 32);
+            const ringMat = new THREE.MeshStandardMaterial({
+                color: 0x8b949e,
+                metalness: 0.95,
+                roughness: 0.3
+            });
+            const ringMesh = new THREE.Mesh(ringGeo, ringMat);
+            ringMesh.rotation.x = Math.PI / 2;
+            ringMesh.position.y = yPos;
+            nutGroup.add(ringMesh);
+        }
+
+        // 5. 3D 工程尺寸标注系统
+        const dimGroup = new THREE.Group();
+        nutGroup.add(dimGroup);
+
+        function createLeader(p1, p2, color = 0x388bfd) {
+            const geo = new THREE.BufferGeometry().setFromPoints([p1, p2]);
+            return new THREE.Line(geo, new THREE.LineBasicMaterial({ color: color, linewidth: 2 }));
+        }
+
+        function createTextLabel(text, color = "#58a6ff") {
+            const canvas = document.createElement('canvas');
+            canvas.width = 300;
+            canvas.height = 70;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = color;
+            ctx.font = 'bold 24px SF Mono, monospace';
+            ctx.fillText(text, 10, 45);
+            const texture = new THREE.CanvasTexture(canvas);
+            const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture }));
+            sprite.scale.set(6, 1.4, 1);
+            return sprite;
+        }
+
+        // 标注：对边距 S = 16mm
+        const yTop = height / 2 + 1;
+        dimGroup.add(createLeader(new THREE.Vector3(-S/2, yTop, 0), new THREE.Vector3(S/2, yTop, 0)));
+        const labelS = createTextLabel("S = 16.00 mm");
+        labelS.position.set(0, yTop + 1.2, 0);
+        dimGroup.add(labelS);
+
+        // 标注：厚度 m = 8.4mm
+        const xOffset = R_outer + 2.5;
+        dimGroup.add(createLeader(new THREE.Vector3(xOffset, -height/2, 0), new THREE.Vector3(xOffset, height/2, 0), 0x3fb950));
+        const labelM = createTextLabel("m = 8.40 mm", "#3fb950");
+        labelM.position.set(xOffset + 4, 0, 0);
+        dimGroup.add(labelM);
+
+        // 标注：内螺纹 M10 x 1.5
+        const labelThread = createTextLabel("M10 × 1.5 螺纹", "#d29922");
+        labelThread.position.set(0, -height/2 - 1.5, 0);
+        dimGroup.add(labelThread);
+
+        // 6. 原生鼠标交互 (拖拽旋转与滚轮缩放，不依赖第三方库)
+        let isDragging = false;
+        let prevX = 0, prevY = 0;
+        let autoRotate = true;
+        let showDims = true;
+
+        window.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            prevX = e.clientX;
+            prevY = e.clientY;
+        });
+
+        window.addEventListener('mouseup', () => isDragging = false);
+
+        window.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            const dx = e.clientX - prevX;
+            const dy = e.clientY - prevY;
+            nutGroup.rotation.y += dx * 0.008;
+            nutGroup.rotation.x += dy * 0.008;
+            prevX = e.clientX;
+            prevY = e.clientY;
+        });
+
+        window.addEventListener('wheel', (e) => {
+            camera.position.z = Math.max(10, Math.min(60, camera.position.z + e.deltaY * 0.05));
+            camera.position.x = Math.max(10, Math.min(60, camera.position.x + e.deltaY * 0.05));
+            camera.position.y = Math.max(8, Math.min(40, camera.position.y + e.deltaY * 0.03));
+        });
+
+        // 工具栏交互
+        document.getElementById('btn-rotate').addEventListener('click', function() {
+            autoRotate = !autoRotate;
+            this.classList.toggle('active', autoRotate);
+        });
+
+        document.getElementById('btn-wireframe').addEventListener('click', function() {
+            hexEdges.visible = !hexEdges.visible;
+            topEdges.visible = !topEdges.visible;
+            botEdges.visible = !botEdges.visible;
+            this.classList.toggle('active', hexEdges.visible);
+        });
+
+        document.getElementById('btn-dims').addEventListener('click', function() {
+            showDims = !showDims;
+            dimGroup.visible = showDims;
+            this.classList.toggle('active', showDims);
+        });
+
+        document.getElementById('btn-reset').addEventListener('click', function() {
+            camera.position.set(22, 16, 24);
+            camera.lookAt(0, 0, 0);
+            nutGroup.rotation.set(0, 0, 0);
+        });
+
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'r' || e.key === 'R') document.getElementById('btn-rotate').click();
+            if (e.key === 'w' || e.key === 'W') document.getElementById('btn-wireframe').click();
+            if (e.key === 'd' || e.key === 'D') document.getElementById('btn-dims').click();
+        });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // 7. 动画主循环
+        function animate() {
+            requestAnimationFrame(animate);
+            if (autoRotate) {
+                nutGroup.rotation.y += 0.006;
+            }
+            renderer.render(scene, camera);
+        }
+        animate();
+    </script>
+</body>
+</html>

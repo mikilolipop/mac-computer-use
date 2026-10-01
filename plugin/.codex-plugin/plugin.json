@@ -1,0 +1,40 @@
+{
+  "name": "computer-use",
+  "version": "1.0.1000968",
+  "description": "Control desktop apps on macOS from ChatGPT through Computer Use. Prefer purpose-built connectors, APIs, or CLIs.",
+  "author": {
+    "name": "OpenAI",
+    "email": "support@openai.com",
+    "url": "https://openai.com/"
+  },
+  "homepage": "https://openai.com/",
+  "license": "Proprietary",
+  "keywords": [
+    "computer-use",
+    "desktop-control",
+    "macos",
+    "automation",
+    "accessibility"
+  ],
+  "mcpServers": "./.mcp.json",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Computer Use",
+    "shortDescription": "Control Mac apps from ChatGPT",
+    "longDescription": "Mac Computer Use lets ChatGPT use any app on your computer, including your web browsers and files you allow it to access. It may take screenshots or page content while working. You stay in control: you choose which apps to allow ChatGPT to access, you can stop actions at any time, and control whether we use screenshots for training.",
+    "developerName": "OpenAI",
+    "category": "Productivity",
+    "websiteURL": "https://openai.com/",
+    "privacyPolicyURL": "https://openai.com/policies/row-privacy-policy/",
+    "termsOfServiceURL": "https://openai.com/policies/row-terms-of-use/",
+    "logo": "./assets/app-icon.png",
+    "defaultPrompt": [
+      "Play a playlist to help me lock in",
+      "Open my calendar and find a good time for a focus block this week",
+      "Play a game in Chess.app"
+    ],
+    "brandColor": "#0F172A",
+    "screenshots": []
+  },
+  "bundledContentVariant": "node-repl"
+}
