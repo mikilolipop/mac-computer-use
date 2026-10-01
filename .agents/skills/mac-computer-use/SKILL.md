@@ -26,7 +26,7 @@ This project exposes 15 MCP tools through `sdk/mcp_server.py`. Use the registere
 ## Choose the window and prepare web accessibility
 
 - When multiple windows exist, call `list_windows({app})`, inspect the candidate with `get_app_state({app, window_id})`, and retain that ID for subsequent app-scoped actions, OCR and batches. IDs are session-specific; a closed or unavailable window must be reselected explicitly.
-- MCP `get_app_state` defaults to `prepare_web=true`. For supported Chromium bundle IDs, it checks for AXWebArea and, when absent, tries AXEnhancedUserInterface with a one-second polling budget. `webAXStatus` reports ready, timeout, attribute_rejected or unsupported_app. AX ready means a web area exists, not that search results loaded. Set false to skip preparation; SDK callers opt in explicitly.
+- MCP `get_app_state` defaults to `prepare_web=true`. For supported Chromium bundle IDs, it checks for AXWebArea and, when absent, tries AXEnhancedUserInterface with a one-second polling budget. `webAXStatus` reports ready (`ready_initial`, `ready_after_prepare`, `ready_full_collection`), timeout, attribute_rejected or unsupported_app. AX ready means a web area exists, not that search results loaded. Set false to skip preparation; SDK callers opt in explicitly.
 - To bring the selected window forward, put `{"action":"activate"}` first in a batch with `window_id`. The engine verifies focus after raising the window. On focus loss it stops inputs; refresh/restore the target before deciding which remaining actions are safe. No automatic replay.
 - For scoped key presses or coordinate clicks use `batch_actions` with `window_id`; standalone `press_key` and `click_coord` remain unscoped compatibility tools.
 
@@ -61,7 +61,8 @@ The window ID and index above are illustrative: use the index observed in the ac
 - `set_value`: standard editable AX controls; it does not guarantee focus or submission.
 - `paste` in a batch: suitable text inputs, with clipboard restoration. Avoid CAD canvas shortcuts.
 - `type_text`: Unicode keyboard input; best suited for ASCII, command bars, and terminals; for multi-byte/CJK text in web forms, prefer set_value or paste.
-- `scroll`: native scoped scroll wheel; smoothly scrolls without click-to-focus or link misclick risks.
+- `scroll`: native scoped scroll wheel (amount range 1..100, validated inside target window bounds); smoothly scrolls without click-to-focus or link misclick risks.
+- `click_text`: OCR text targeting with strict ambiguity checking; identical or multiple matches require `occurrence` (1..N) to prevent misclicks.
 - `send_chat`: returns `dispatched`; verify the visible result before claiming delivery.
 
 ## Recover without turning a user task into engine development

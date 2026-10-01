@@ -231,6 +231,8 @@ class CuaClient:
 
     def scroll(self, app: str, direction: str = "down", amount: int = 5, x: Optional[float] = None, y: Optional[float] = None, timeout: float = 15.0, window_id: Optional[int] = None) -> bool:
         """Scroll application contents using native CGEvent scroll wheel."""
+        if not (1 <= amount <= 100):
+            raise ValueError(f"Scroll amount must be between 1 and 100, got {amount}")
         args = ["scroll", "--app", app, "--direction", direction, "--amount", str(amount)]
         if x is not None:
             args.extend(["--x", str(x)])

@@ -129,7 +129,7 @@ TOOLS = [
             "properties": {
                 "app": {"type": "string", "description": "Application display name or bundle ID"},
                 "direction": {"type": "string", "enum": ["down", "up", "left", "right"], "default": "down", "description": "Scroll direction. Defaults to 'down'."},
-                "amount": {"type": "integer", "default": 5, "description": "Number of scroll lines. Defaults to 5."},
+                "amount": {"type": "integer", "minimum": 1, "maximum": 100, "default": 5, "description": "Number of scroll lines (1-100). Defaults to 5."},
                 "x": {"type": "number", "description": "Optional desktop X coordinate to scroll over (defaults to window center)"},
                 "y": {"type": "number", "description": "Optional desktop Y coordinate to scroll over (defaults to window center)"}
             },
@@ -270,7 +270,9 @@ TOOLS = [
                             },
                             "amount": {
                                 "type": "integer",
-                                "description": "Number of scroll lines for scroll action"
+                                "minimum": 1,
+                                "maximum": 100,
+                                "description": "Number of scroll lines (1-100) for scroll action"
                             },
                             "occurrence": {
                                 "type": "integer",
