@@ -279,7 +279,9 @@ for tool in TOOLS:
         props["prepare_web"] = {"type": "boolean", "default": True, "description": "Prepare supported Chromium AX when needed; set false to disable. webAXStatus is not page-load status."}
         props.update(view={"type": "string", "enum": ["text", "diff"], "default": "text"},
                      include_elements={"type": "boolean", "default": False},
-                     image_max_edge={"type": "integer", "minimum": 320, "maximum": 2560, "default": 1280})
+                     image_max_edge={"type": "integer", "minimum": 320, "maximum": 2560, "default": 1280},
+                     max_nodes={"type": "integer", "minimum": 10, "maximum": 10000, "default": 1000,
+                                "description": "Maximum number of accessibility nodes to traverse (default 1000). Set higher for complex web pages."})
     if tool["name"] == "batch_actions":
         tool["inputSchema"]["properties"].update(
             observe_after={"type": "boolean", "default": False, "description": "Return a fresh observation after successful dispatch in the same tool call; does not prove page readiness."},
@@ -370,7 +372,9 @@ def handle_call_tool(params: Dict[str, Any]) -> Dict[str, Any]:
             no_img = args.get("no_img", True)
             compact = args.get("compact", True)
             annotate = args.get("annotate", False)
-            state = client.get_state(app, diff=diff, no_img=no_img, compact=compact, annotate=annotate, prepare_web=args.get("prepare_web", True), **scope)
+            max_nodes = args.get("max_nodes")
+            state = client.get_state(app, diff=diff, no_img=no_img, compact=compact, annotate=annotate,
+                                     prepare_web=args.get("prepare_web", True), max_nodes=max_nodes, **scope)
 
             return render_state(state, no_img=no_img, annotate=annotate,
                                 view=args.get("view", "text"), include_elements=args.get("include_elements", False),

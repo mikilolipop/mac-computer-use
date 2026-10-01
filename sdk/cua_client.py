@@ -125,7 +125,8 @@ class CuaClient:
         annotate: bool = True,
         timeout: float = 15.0,
         window_id: Optional[int] = None,
-        prepare_web: bool = False
+        prepare_web: bool = False,
+        max_nodes: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Inspect application state.
@@ -148,6 +149,10 @@ class CuaClient:
             args.append("--no-img")
         if compact:
             args.append("--compact")
+        if max_nodes is not None:
+            if isinstance(max_nodes, bool) or not isinstance(max_nodes, int) or max_nodes <= 0:
+                raise ValueError("max_nodes must be a positive integer")
+            args += ["--max-nodes", str(max_nodes)]
 
         if prepare_web:
             args += ["--prepare-web", "true"]

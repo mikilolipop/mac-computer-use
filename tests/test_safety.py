@@ -48,10 +48,17 @@ class ProtocolTests(unittest.TestCase):
                            ("click_coord", {"x": float("inf"), "y": 2}),
                            ("type_text", {"text": 4}),
                            ("doctor", {"prompt": "true"}),
-                           ("doctor", {"typo": False})]:
+                           ("doctor", {"typo": False}),
+                           ("get_app_state", {"app": "a", "max_nodes": 5}),
+                           ("get_app_state", {"app": "a", "max_nodes": "fast"})]:
             with self.subTest(name=name, args=args):
                 self.assertTrue(self.call(name, args)["result"]["isError"])
         self.assertEqual(self.fake.mock_calls, [])
+
+    def test_max_nodes_forwarded(self):
+        self.fake.get_state.return_value = {"success": True, "text": "ok"}
+        self.call("get_app_state", {"app": "a", "max_nodes": 500})
+        self.assertEqual(self.fake.get_state.call_args.kwargs.get("max_nodes"), 500)
 
     def test_state_failure_is_tool_error(self):
         self.fake.get_state.return_value = {"success": False, "error": "missing app"}

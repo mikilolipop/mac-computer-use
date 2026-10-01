@@ -110,6 +110,22 @@ class PerceptionTests(unittest.TestCase):
         self.assertIn("responseBytes", joined)
         self.assertNotIn("PRIVATE_PAGE_CONTENT", joined)
 
+    @unittest.skipUnless(importlib.util.find_spec("PIL"), "Optional Pillow image backend not installed")
+    def test_visual_annotator_handles_nan_and_degenerate_bounds(self):
+        from PIL import Image
+        from sdk.visual_annotator import annotate_screenshot
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "test.png"
+            Image.new("RGB", (200, 200), "white").save(path)
+            elements = [
+                {"index": 1, "bounds": {"x": float("nan"), "y": 0, "width": 10, "height": 10}},
+                {"index": 2, "bounds": {"x": 10, "y": 10, "width": -5, "height": 10}},
+                {"index": 3, "bounds": {"x": 20, "y": 20, "width": 50, "height": 50}},
+            ]
+            nan_window = {"x": float("nan"), "y": 0, "width": float("nan"), "height": 100}
+            out = annotate_screenshot(str(path), elements, window_bounds=nan_window)
+            self.assertTrue(Path(out).exists())
+
 
 if __name__ == "__main__":
     unittest.main()

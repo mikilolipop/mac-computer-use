@@ -47,6 +47,7 @@ struct StateResponse: Codable {
     var sessionId: String? = nil
     var timingsMs: [String: Double]? = nil
     var webAXStatus: String? = nil
+    var isTruncated: Bool? = nil
 }
 
 struct DoctorResponse: Codable {
@@ -130,6 +131,33 @@ let cacheDir: URL = {
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
     return dir
 }()
+
+func pruneStaleCacheFiles(maxAgeSeconds: TimeInterval = 1800) {
+    let fm = FileManager.default
+    guard let files = try? fm.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+    let cutoff = Date(timeIntervalSinceNow: -maxAgeSeconds)
+    for file in files {
+        if let attrs = try? file.resourceValues(forKeys: [.contentModificationDateKey]),
+           let modDate = attrs.contentModificationDate,
+           modDate < cutoff {
+            try? fm.removeItem(at: file)
+        }
+    }
+}
+
+func pruneOldSessionDirs(maxAgeSeconds: TimeInterval = 86400) {
+    let fm = FileManager.default
+    let base = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("mac-cua")
+    guard let entries = try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+    let cutoff = Date(timeIntervalSinceNow: -maxAgeSeconds)
+    for entry in entries {
+        if let attrs = try? entry.resourceValues(forKeys: [.contentModificationDateKey]),
+           let modDate = attrs.contentModificationDate,
+           modDate < cutoff {
+            try? fm.removeItem(at: entry)
+        }
+    }
+}
 
 func cacheURL(for app: String, type: String) -> URL {
     let key = SHA256.hash(data: Data(app.utf8)).map { String(format: "%02x", $0) }.joined()
@@ -323,6 +351,75 @@ func findRunningApp(named identifier: String) -> NSRunningApplication? {
     return nil
 }
 
+func resolveAppURL(named identifier: String) -> URL? {
+    if identifier.hasPrefix("/") || identifier.hasSuffix(".app") {
+        let url = URL(fileURLWithPath: identifier)
+        if FileManager.default.fileExists(atPath: url.path) {
+            return url
+        }
+    }
+    if identifier.contains(".") {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: identifier) {
+            return url
+        }
+    }
+    let candidateFolders = [
+        "/Applications",
+        "/System/Applications",
+        "/System/Applications/Utilities",
+        NSHomeDirectory() + "/Applications"
+    ]
+    let fm = FileManager.default
+    for folder in candidateFolders {
+        let target = folder + "/\(identifier).app"
+        if fm.fileExists(atPath: target) {
+            return URL(fileURLWithPath: target)
+        }
+    }
+    for folder in candidateFolders {
+        guard let contents = try? fm.contentsOfDirectory(atPath: folder) else { continue }
+        for item in contents where item.hasSuffix(".app") {
+            let baseName = String(item.dropLast(4))
+            if baseName.caseInsensitiveCompare(identifier) == .orderedSame {
+                return URL(fileURLWithPath: folder + "/\(item)")
+            }
+        }
+    }
+    return nil
+}
+
+func launchApplicationByName(_ name: String) -> Bool {
+    if let url = resolveAppURL(named: name) {
+        if #available(macOS 10.15, *) {
+            let config = NSWorkspace.OpenConfiguration()
+            config.activates = true
+            let sema = DispatchSemaphore(value: 0)
+            var launched = false
+            NSWorkspace.shared.openApplication(at: url, configuration: config) { app, error in
+                launched = (app != nil && error == nil)
+                sema.signal()
+            }
+            _ = sema.wait(timeout: .now() + 5.0)
+            if launched { return true }
+        }
+    }
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    proc.arguments = ["-a", name]
+    do {
+        try proc.run()
+        let deadline = ProcessInfo.processInfo.systemUptime + 5.0
+        while proc.isRunning && ProcessInfo.processInfo.systemUptime < deadline { usleep(10000) }
+        if proc.isRunning {
+            proc.terminate()
+            return false
+        }
+        return proc.terminationStatus == 0
+    } catch {
+        return false
+    }
+}
+
 // MARK: - Unified AXTree Traversal & Filtering Logic
 
 func isIgnoredRole(_ role: String) -> Bool {
@@ -367,9 +464,18 @@ class TreeCollector {
     private var currentIndex = 1
     var compact: Bool = false
     var hasWebArea = false
+    var maxNodes: Int = 1000
+    private var visitedNodes = 0
+    var isTruncated = false
 
     func collect(element: AXUIElement, depth: Int = 0, maxDepth: Int = 20) {
-        if depth > maxDepth { return }
+        if depth > maxDepth || visitedNodes >= maxNodes {
+            if visitedNodes >= maxNodes {
+                isTruncated = true
+            }
+            return
+        }
+        visitedNodes += 1
 
         var roleValue: AnyObject?
         AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleValue)
@@ -456,7 +562,13 @@ class TreeCollector {
         let result = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenValue)
         if result == .success, let children = childrenValue as? [AXUIElement] {
             for child in children {
-                collect(element: child, depth: depth + 1, maxDepth: maxDepth)
+                if visitedNodes >= maxNodes {
+                    isTruncated = true
+                    break
+                }
+                autoreleasepool {
+                    collect(element: child, depth: depth + 1, maxDepth: maxDepth)
+                }
             }
         }
     }
@@ -471,6 +583,9 @@ func findLiveElement(appPID: pid_t, targetIndex: Int) -> (element: AXUIElement, 
           let scope = focusedScope(appPID), let bounds = getElementBounds(scope),
           let windowID = scopedWindowID(appPID, bounds) else { return nil }
     let collector = TreeCollector()
+    if let raw = cliOption("--max-nodes"), let customMax = Int(raw), customMax > 0 {
+        collector.maxNodes = customMax
+    }
     collector.collect(element: scope)
     guard let offset = resolveSnapshotTarget(snap, pid: appPID, launchedAt: launch, windowID: windowID,
                           bounds: bounds, elements: collector.elements, targetIndex: targetIndex, now: Date().timeIntervalSince1970),
@@ -1013,6 +1128,8 @@ func printUsage() {
 }
 
 func main() {
+    pruneStaleCacheFiles()
+    pruneOldSessionDirs()
     let args = CommandLine.arguments
     guard args.count >= 2 else {
         printUsage()
@@ -1114,7 +1231,7 @@ func main() {
             usleep(120000)
             let res = GenericResponse(success: true, action: "activated", pid: runningApp.processIdentifier)
             outputJSON(res)
-        } else if NSWorkspace.shared.launchApplication(appName) {
+        } else if launchApplicationByName(appName) {
             let res = GenericResponse(success: true, action: "launched")
             outputJSON(res)
         } else {
@@ -1163,6 +1280,9 @@ func main() {
         }
         let axStarted = ProcessInfo.processInfo.systemUptime
         var collector = TreeCollector()
+        if let raw = cliOption("--max-nodes"), let customMax = Int(raw), customMax > 0 {
+            collector.maxNodes = customMax
+        }
         collector.compact = compactMode
         collector.collect(element: focusedWindow)
         var webAXStatus = "not_requested"
@@ -1182,6 +1302,9 @@ func main() {
                     repeat {
                         usleep(100000)
                         collector = TreeCollector()
+                        if let raw = cliOption("--max-nodes"), let customMax = Int(raw), customMax > 0 {
+                            collector.maxNodes = customMax
+                        }
                         collector.compact = compactMode
                         collector.collect(element: focusedWindow)
                         if collector.hasWebArea { webAXStatus = "ready"; break }
@@ -1238,7 +1361,9 @@ func main() {
             timingsMs: ["axCollection": (axFinished - axStarted) * 1000,
                         "capture": (captureFinished - captureStarted) * 1000,
                         "webPreparation": prepareMs,
-                        "stateTotal": (ProcessInfo.processInfo.systemUptime - stateStarted) * 1000], webAXStatus: webAXStatus)
+                        "stateTotal": (ProcessInfo.processInfo.systemUptime - stateStarted) * 1000],
+            webAXStatus: webAXStatus,
+            isTruncated: collector.isTruncated ? true : nil)
         outputJSON(response, pretty: true)
 
     case "click":

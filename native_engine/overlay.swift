@@ -117,12 +117,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             exit(1)
         }
 
-        guard let mainScreen = NSScreen.main else {
-            fputs("No main screen found\n", stderr)
+        guard let primaryScreen = NSScreen.screens.first else {
+            fputs("No screen found\n", stderr)
             exit(1)
         }
 
-        let screenHeight = mainScreen.frame.height
+        guard cgBounds.width > 0, cgBounds.height > 0,
+              cgBounds.origin.x.isFinite, cgBounds.origin.y.isFinite else {
+            fputs("Invalid window bounds for overlay\n", stderr)
+            exit(1)
+        }
+
+        let screenHeight = primaryScreen.frame.height
         let nsY = screenHeight - cgBounds.origin.y - cgBounds.height
         let windowFrame = NSRect(x: cgBounds.origin.x, y: nsY, width: cgBounds.width, height: cgBounds.height)
 

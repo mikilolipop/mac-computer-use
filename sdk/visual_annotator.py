@@ -44,11 +44,17 @@ def annotate_screenshot(
     win_w = float(img_w)
     win_h = float(img_h)
 
+    import math
     if window_bounds:
-        win_x = float(window_bounds.get("x", 0.0))
-        win_y = float(window_bounds.get("y", 0.0))
-        win_w = float(window_bounds.get("width") or img_w)
-        win_h = float(window_bounds.get("height") or img_h)
+        try:
+            bx = float(window_bounds.get("x", 0.0))
+            by = float(window_bounds.get("y", 0.0))
+            bw = float(window_bounds.get("width") or img_w)
+            bh = float(window_bounds.get("height") or img_h)
+            if math.isfinite(bx) and math.isfinite(by) and math.isfinite(bw) and math.isfinite(bh) and bw > 0 and bh > 0:
+                win_x, win_y, win_w, win_h = bx, by, bw, bh
+        except (ValueError, TypeError):
+            pass
 
     scale_x = img_w / win_w if win_w > 0 else 1.0
     scale_y = img_h / win_h if win_h > 0 else 1.0
@@ -77,10 +83,15 @@ def annotate_screenshot(
         if not bounds or idx is None:
             continue
 
-        ex = float(bounds.get("x", 0.0))
-        ey = float(bounds.get("y", 0.0))
-        ew = float(bounds.get("width", 0.0))
-        eh = float(bounds.get("height", 0.0))
+        try:
+            ex = float(bounds.get("x", 0.0))
+            ey = float(bounds.get("y", 0.0))
+            ew = float(bounds.get("width", 0.0))
+            eh = float(bounds.get("height", 0.0))
+            if not (math.isfinite(ex) and math.isfinite(ey) and math.isfinite(ew) and math.isfinite(eh)):
+                continue
+        except (ValueError, TypeError):
+            continue
 
         if ew <= 0 or eh <= 0:
             continue
