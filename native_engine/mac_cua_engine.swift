@@ -97,6 +97,7 @@ struct GenericResponse: Codable {
     var key: String? = nil
     var app: String? = nil
     var navigatedTo: String? = nil
+    var url: String? = nil
     var executed: Int? = nil
     var failedIndex: Int? = nil
     var foundText: String? = nil
@@ -811,17 +812,48 @@ func ocrWindow(appPID: pid_t, forceRefresh: Bool = false) -> OCRWindowFrame? {
     return result
 }
 
-func findMatchesInWindow(appPID: pid_t, query: String, exact: Bool = false, minConfidence: Float = 0.0) -> [OCRMatch] {
-    guard let frame = ocrWindow(appPID: appPID) else { return [] }
-    return frame.matches.filter { match in
+func filterOCRMatches(_ matches: [OCRMatch], query: String, exact: Bool = false, minConfidence: Float = 0.0) -> [OCRMatch] {
+    return matches.filter { match in
         guard match.confidence >= minConfidence else { return false }
         return exact ? (match.text.caseInsensitiveCompare(query) == .orderedSame)
                      : match.text.localizedCaseInsensitiveContains(query)
     }
 }
 
+func resolveOCRTargetFromMatches(
+    _ matches: [OCRMatch],
+    query: String,
+    occurrence: Int? = nil
+) throws -> OCRMatch {
+    if matches.isEmpty {
+        throw OCRError.notFound(query)
+    }
+    if let occ = occurrence {
+        guard occ >= 1 && occ <= matches.count else {
+            throw OCRError.outOfBounds(occ, matches.count)
+        }
+        return matches[occ - 1]
+    } else if matches.count > 1 {
+        // P1-2: duplicate matches with exact=true (e.g. ["搜索", "搜索"]) are STILL ambiguous without explicit occurrence!
+        throw OCRError.ambiguous(query, matches.count, matches)
+    } else {
+        return matches.first!
+    }
+}
+
+func findMatchesInWindow(
+    appPID: pid_t,
+    query: String,
+    exact: Bool = false,
+    minConfidence: Float = 0.0,
+    forceRefresh: Bool = false
+) -> [OCRMatch] {
+    guard let frame = ocrWindow(appPID: appPID, forceRefresh: forceRefresh) else { return [] }
+    return filterOCRMatches(frame.matches, query: query, exact: exact, minConfidence: minConfidence)
+}
+
 func findTextInWindow(appPID: pid_t, query: String, exact: Bool = false) -> TextMatchResult? {
-    let matches = findMatchesInWindow(appPID: appPID, query: query, exact: exact)
+    let matches = findMatchesInWindow(appPID: appPID, query: query, exact: exact, forceRefresh: false)
     guard let first = matches.first else { return nil }
     return TextMatchResult(text: first.text, desktopX: first.desktopX, desktopY: first.desktopY, confidence: first.confidence, bounds: first.bounds)
 }
@@ -837,23 +869,17 @@ func resolveOCRTarget(
     query: String,
     exact: Bool = false,
     occurrence: Int? = nil,
-    minConfidence: Float = 0.0
+    minConfidence: Float = 0.0,
+    forceRefresh: Bool = true
 ) throws -> OCRMatch {
-    let matches = findMatchesInWindow(appPID: appPID, query: query, exact: exact, minConfidence: minConfidence)
-    if matches.isEmpty {
-        throw OCRError.notFound(query)
-    }
-    if let occ = occurrence {
-        guard occ >= 1 && occ <= matches.count else {
-            throw OCRError.outOfBounds(occ, matches.count)
-        }
-        return matches[occ - 1]
-    } else if matches.count > 1 {
-        // P1-2: duplicate matches with exact=true (e.g. ["搜索", "搜索"]) are STILL ambiguous without explicit occurrence!
-        throw OCRError.ambiguous(query, matches.count, matches)
-    } else {
-        return matches.first!
-    }
+    let matches = findMatchesInWindow(
+        appPID: appPID,
+        query: query,
+        exact: exact,
+        minConfidence: minConfidence,
+        forceRefresh: forceRefresh
+    )
+    return try resolveOCRTargetFromMatches(matches, query: query, occurrence: occurrence)
 }
 
 // MARK: - Diff Computation
@@ -1119,22 +1145,91 @@ func getFocusedUIElement(for pid: pid_t) -> AXUIElement? {
     return (elem as! AXUIElement)
 }
 
+func parseURLComponents(_ string: String) -> URLComponents? {
+    let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    let withScheme = trimmed.contains("://") ? trimmed : "https://" + trimmed
+    if let comp = URLComponents(string: withScheme) {
+        return comp
+    }
+    if let encoded = withScheme.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed.union(.urlPathAllowed)),
+       let comp = URLComponents(string: encoded) {
+        return comp
+    }
+    return nil
+}
+
 func textMatchesTargetURL(_ text: String, targetURL: String) -> Bool {
     let cleanTarget = targetURL.trimmingCharacters(in: .whitespacesAndNewlines)
     let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    if cleanText.localizedCaseInsensitiveContains(cleanTarget) {
+    guard !cleanTarget.isEmpty && !cleanText.isEmpty else { return false }
+
+    // Direct case-insensitive equality
+    if cleanText.caseInsensitiveCompare(cleanTarget) == .orderedSame {
         return true
     }
+
     let withoutScheme = cleanTarget.replacingOccurrences(of: "^https?://", with: "", options: .regularExpression)
-    if !withoutScheme.isEmpty && cleanText.localizedCaseInsensitiveContains(withoutScheme) {
+    if cleanText.caseInsensitiveCompare(withoutScheme) == .orderedSame {
         return true
     }
-    if let targetParsed = URL(string: cleanTarget), let host = targetParsed.host, !host.isEmpty {
-        if cleanText.localizedCaseInsensitiveContains(host) {
-            return true
+
+    guard let targetComp = parseURLComponents(cleanTarget) else {
+        return !withoutScheme.isEmpty && cleanText.localizedCaseInsensitiveContains(withoutScheme)
+    }
+
+    guard let textComp = parseURLComponents(cleanText) else {
+        return !withoutScheme.isEmpty && cleanText.localizedCaseInsensitiveContains(withoutScheme)
+    }
+
+    // 1. Host comparison (strip optional www.)
+    guard let targetHostRaw = targetComp.host?.lowercased(), !targetHostRaw.isEmpty,
+          let textHostRaw = textComp.host?.lowercased(), !textHostRaw.isEmpty else {
+        return false
+    }
+
+    let targetHost = targetHostRaw.hasPrefix("www.") ? String(targetHostRaw.dropFirst(4)) : targetHostRaw
+    let textHost = textHostRaw.hasPrefix("www.") ? String(textHostRaw.dropFirst(4)) : textHostRaw
+
+    if targetHost != textHost {
+        return false
+    }
+
+    // 2. Path comparison
+    let normTargetPath = targetComp.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    let normTextPath = textComp.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+
+    if !normTargetPath.isEmpty {
+        // Non-root target path requires exact path match (percent-decoding aware)
+        let decTargetPath = normTargetPath.removingPercentEncoding ?? normTargetPath
+        let decTextPath = normTextPath.removingPercentEncoding ?? normTextPath
+        if decTextPath.localizedCaseInsensitiveCompare(decTargetPath) != .orderedSame {
+            return false
+        }
+    } else {
+        // Target is bare root domain: reject if omnibox still points to a specific subpath
+        if !normTextPath.isEmpty {
+            return false
         }
     }
-    return false
+
+    // 3. Query comparison
+    if let targetQueryItems = targetComp.queryItems, !targetQueryItems.isEmpty {
+        guard let textQueryItems = textComp.queryItems else {
+            return false
+        }
+        for tItem in targetQueryItems {
+            let matched = textQueryItems.contains { oItem in
+                oItem.name.localizedCaseInsensitiveCompare(tItem.name) == .orderedSame &&
+                (oItem.value ?? "").localizedCaseInsensitiveCompare(tItem.value ?? "") == .orderedSame
+            }
+            if !matched {
+                return false
+            }
+        }
+    }
+
+    return true
 }
 
 func performNavigate(app: NSRunningApplication, url: String) -> Bool {
@@ -2328,11 +2423,6 @@ func main() {
                 i += 1
             }
         }
-        guard let target = appName, let runningApp = findRunningApp(named: target) else {
-            let res = GenericResponse(success: false, error: "--app is required and must be running")
-            outputJSON(res)
-            exit(2)
-        }
         guard ["up", "down", "left", "right"].contains(direction) else {
             let res = GenericResponse(success: false, error: "Invalid scroll direction '\(direction)', must be up, down, left, or right", code: "INVALID_ARGUMENT")
             outputJSON(res)
@@ -2340,6 +2430,16 @@ func main() {
         }
         guard (1...100).contains(amount) else {
             let res = GenericResponse(success: false, error: "Scroll amount must be between 1 and 100, got \(amount)", code: "INVALID_ARGUMENT")
+            outputJSON(res)
+            exit(2)
+        }
+        guard let target = appName else {
+            let res = GenericResponse(success: false, error: "--app is required", code: "INVALID_ARGUMENT")
+            outputJSON(res)
+            exit(2)
+        }
+        guard let runningApp = findRunningApp(named: target) else {
+            let res = GenericResponse(success: false, error: "App '\(target)' not running", code: "APP_NOT_RUNNING")
             outputJSON(res)
             exit(2)
         }
@@ -2408,6 +2508,96 @@ func main() {
         res.x = Double(scrollPt.x)
         res.y = Double(scrollPt.y)
         outputJSON(res)
+
+    case "test-match-url":
+        var textArg: String? = nil
+        var targetArg: String? = nil
+        var i = 2
+        while i < args.count {
+            if args[i] == "--text", i + 1 < args.count {
+                textArg = args[i + 1]
+                i += 2
+            } else if args[i] == "--target", i + 1 < args.count {
+                targetArg = args[i + 1]
+                i += 2
+            } else {
+                i += 1
+            }
+        }
+        guard let text = textArg, let target = targetArg else {
+            let res = GenericResponse(success: false, error: "--text and --target are required")
+            outputJSON(res)
+            exit(2)
+        }
+        let matched = textMatchesTargetURL(text, targetURL: target)
+        var res = GenericResponse(success: matched, action: "test-match-url")
+        res.foundText = text
+        res.url = target
+        outputJSON(res)
+        exit(matched ? 0 : 1)
+
+    case "test-resolve-ocr":
+        var matchesJSON: String? = nil
+        var queryText: String? = nil
+        var exact = false
+        var occurrence: Int? = nil
+        var minConf: Float = 0.0
+        var i = 2
+        while i < args.count {
+            if args[i] == "--matches", i + 1 < args.count {
+                matchesJSON = args[i + 1]
+                i += 2
+            } else if args[i] == "--query", i + 1 < args.count {
+                queryText = args[i + 1]
+                i += 2
+            } else if args[i] == "--exact" {
+                exact = true
+                i += 1
+            } else if args[i] == "--occurrence", i + 1 < args.count {
+                occurrence = Int(args[i + 1])
+                i += 2
+            } else if args[i] == "--min-confidence", i + 1 < args.count {
+                minConf = Float(args[i + 1]) ?? 0.0
+                i += 2
+            } else {
+                i += 1
+            }
+        }
+        guard let mJson = matchesJSON, let q = queryText else {
+            let res = GenericResponse(success: false, error: "--matches and --query are required")
+            outputJSON(res)
+            exit(2)
+        }
+        guard let data = mJson.data(using: .utf8),
+              let rawMatches = try? JSONDecoder().decode([OCRMatch].self, from: data) else {
+            let res = GenericResponse(success: false, error: "Invalid matches JSON")
+            outputJSON(res)
+            exit(2)
+        }
+        let filtered = filterOCRMatches(rawMatches, query: q, exact: exact, minConfidence: minConf)
+        do {
+            let resolved = try resolveOCRTargetFromMatches(filtered, query: q, occurrence: occurrence)
+            var res = GenericResponse(success: true, action: "resolve-ocr")
+            res.foundText = resolved.text
+            res.desktopX = resolved.desktopX
+            res.desktopY = resolved.desktopY
+            res.confidence = resolved.confidence
+            res.bounds = resolved.bounds
+            outputJSON(res)
+            exit(0)
+        } catch OCRError.notFound(let notFoundQuery) {
+            outputJSON(GenericResponse(success: false, error: "Text '\(notFoundQuery)' not found", code: "TEXT_NOT_FOUND"))
+            exit(1)
+        } catch OCRError.ambiguous(let ambQuery, let count, _) {
+            outputJSON(GenericResponse(success: false, error: "AMBIGUOUS_TEXT: found \(count) matches for '\(ambQuery)'", code: "AMBIGUOUS_TEXT", matchCount: count))
+            exit(1)
+        } catch OCRError.outOfBounds(let occ, let count) {
+            outputJSON(GenericResponse(success: false, error: "Occurrence \(occ) out of bounds (\(count) matches found)", code: "OUT_OF_BOUNDS", matchCount: count))
+            exit(1)
+        } catch {
+            outputJSON(GenericResponse(success: false, error: "\(error)"))
+            exit(1)
+        }
 
     default:
         printUsage()

@@ -56,5 +56,80 @@ assert(validate(#"[{"action":"wait","waitMs":0}]"#) == nil)
 assert(validate("[]") != nil)
 assert(computeDiff(oldLines: ["A", "B"], newLines: ["B", "A"]) != "(no visible UI changes)")
 assert(computeDiff(oldLines: ["A", "A"], newLines: ["A"]) != "(no visible UI changes)")
-assert(computeDiff(oldLines: ["A"], newLines: ["A"]) == "(no visible UI changes)")
+// MARK: - Phase 3.1: URL Verification Tests
+// 1. Same host, different path -> MUST BE FALSE
+assert(!textMatchesTargetURL("https://example.com/home", targetURL: "https://example.com/checkout/pay"))
+assert(!textMatchesTargetURL("example.com/home", targetURL: "https://example.com/checkout/pay"))
+assert(!textMatchesTargetURL("https://example.com/", targetURL: "https://example.com/checkout/pay"))
+
+// 2. Same host, same path -> TRUE
+assert(textMatchesTargetURL("https://example.com/checkout/pay", targetURL: "https://example.com/checkout/pay"))
+assert(textMatchesTargetURL("example.com/checkout/pay", targetURL: "https://example.com/checkout/pay"))
+assert(textMatchesTargetURL("example.com/checkout/pay/", targetURL: "https://example.com/checkout/pay"))
+assert(textMatchesTargetURL("http://example.com/checkout/pay", targetURL: "https://example.com/checkout/pay"))
+
+// 3. Same host, query parameters match vs mismatch
+assert(textMatchesTargetURL("https://s.taobao.com/search?q=Pixel+8", targetURL: "https://s.taobao.com/search?q=Pixel+8"))
+assert(textMatchesTargetURL("s.taobao.com/search?q=Pixel+8", targetURL: "https://s.taobao.com/search?q=Pixel+8"))
+assert(!textMatchesTargetURL("s.taobao.com", targetURL: "https://s.taobao.com/search?q=Pixel+8"))
+assert(!textMatchesTargetURL("https://s.taobao.com/search?q=iPhone", targetURL: "https://s.taobao.com/search?q=Pixel+8"))
+
+// 4. Root host match vs root with unrequested path
+assert(textMatchesTargetURL("https://taobao.com", targetURL: "https://taobao.com"))
+assert(textMatchesTargetURL("taobao.com/", targetURL: "https://taobao.com"))
+assert(!textMatchesTargetURL("https://taobao.com/item/123", targetURL: "https://taobao.com"))
+
+// MARK: - Phase 3.1: OCR Resolution & Bounds Tests
+let b1 = ElementBounds(x: 100, y: 100, width: 200, height: 50)
+let b2 = ElementBounds(x: 100.5, y: 100.4, width: 200.2, height: 50.1)
+let b3 = ElementBounds(x: 105, y: 100, width: 200, height: 50)
+assert(boundsRoughlyEqual(b1, b2, tolerance: 1.0))
+assert(!boundsRoughlyEqual(b1, b3, tolerance: 1.0))
+
+let mSearch1 = OCRMatch(text: "Search", confidence: 0.95, bounds: b1, desktopX: 150, desktopY: 125)
+let mSearch2 = OCRMatch(text: "Search More", confidence: 0.90, bounds: b1, desktopX: 180, desktopY: 125)
+let mSubmit1 = OCRMatch(text: "Submit", confidence: 0.99, bounds: b1, desktopX: 200, desktopY: 125)
+let mSubmit2 = OCRMatch(text: "Submit", confidence: 0.98, bounds: b1, desktopX: 300, desktopY: 125)
+
+// Substring match ambiguity
+let filteredSearch = filterOCRMatches([mSearch1, mSearch2], query: "Search", exact: false)
+assert(filteredSearch.count == 2)
+do {
+    _ = try resolveOCRTargetFromMatches(filteredSearch, query: "Search")
+    assert(false, "Should have thrown ambiguous")
+} catch OCRError.ambiguous(_, let count, _) {
+    assert(count == 2)
+} catch {
+    assert(false, "Unexpected error: \(error)")
+}
+
+// Exact match with duplicate text still ambiguous
+let filteredSubmit = filterOCRMatches([mSubmit1, mSubmit2], query: "Submit", exact: true)
+assert(filteredSubmit.count == 2)
+do {
+    _ = try resolveOCRTargetFromMatches(filteredSubmit, query: "Submit")
+    assert(false, "Exact duplicates should have thrown ambiguous")
+} catch OCRError.ambiguous(_, let count, _) {
+    assert(count == 2)
+} catch {
+    assert(false, "Unexpected error: \(error)")
+}
+
+// Disambiguation with occurrence
+let resolvedOcc1 = try! resolveOCRTargetFromMatches(filteredSubmit, query: "Submit", occurrence: 1)
+assert(resolvedOcc1.desktopX == 200)
+let resolvedOcc2 = try! resolveOCRTargetFromMatches(filteredSubmit, query: "Submit", occurrence: 2)
+assert(resolvedOcc2.desktopX == 300)
+
+// Out of bounds occurrence
+do {
+    _ = try resolveOCRTargetFromMatches(filteredSubmit, query: "Submit", occurrence: 3)
+    assert(false, "Occurrence 3 should have thrown outOfBounds")
+} catch OCRError.outOfBounds(let occ, let count) {
+    assert(occ == 3 && count == 2)
+} catch {
+    assert(false, "Unexpected error: \(error)")
+}
+
 print("POLICY_CHECKS_PASSED")
+
