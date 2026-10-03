@@ -6,13 +6,13 @@ OpenAI Codex Computer Use 在 macOS 系统上的核心执行体位于 `~/.codex/
 
 ```mermaid
 graph TD
-    A[Codex CLI / NodeREPL Client] -->|UDS: computeruse.sock| B[SkyComputerUseService 守护进程]
-    C[SkyComputerUseClient CLI / MCP] -->|CLI / MCP 代理| B
-    B --> D[CUALockScreenGuardian 锁屏卫士]
-    B --> E[macOS Accessibility API (AXUIElement)]
-    B --> F[ScreenCaptureKit / CoreGraphics 截屏]
-    B --> G[CGEvent 虚拟键鼠合成]
-    H[Codex Computer Use Installer] -->|配置系统授权| I[系统设置: 辅助功能 & 屏幕录制]
+    A["Codex CLI / NodeREPL Client"] -->|UDS: computeruse.sock| B["SkyComputerUseService 守护进程"]
+    C["SkyComputerUseClient CLI / MCP"] -->|CLI / MCP 代理| B
+    B --> D["CUALockScreenGuardian 锁屏卫士"]
+    B --> E["macOS Accessibility API (AXUIElement)"]
+    B --> F["ScreenCaptureKit / CoreGraphics 截屏"]
+    B --> G["CGEvent 虚拟键鼠合成"]
+    H["Codex Computer Use Installer"] -->|配置系统授权| I["系统设置: 辅助功能 & 屏幕录制"]
 ```
 
 ### 1. `SkyComputerUseService` (主守护进程)

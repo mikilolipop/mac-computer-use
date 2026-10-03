@@ -49,28 +49,28 @@
 
 ```mermaid
 graph TD
-    subgraph Agent / Codex 运行时
-        A[ChatGPT / Codex LLM] -->|提示词引导| B[Skill 规范 / Confirmations Policy]
-        B -->|执行脚本| C[node_repl 运行时]
-        C -->|引入| D[@oai/sky SDK]
+    subgraph sub1 ["Agent / Codex 运行时"]
+        A["ChatGPT / Codex LLM"] -->|提示词引导| B["Skill 规范 / Confirmations Policy"]
+        B -->|执行脚本| C["node_repl 运行时"]
+        C -->|引入| D["@oai/sky SDK"]
     end
 
-    subgraph 进程间通信 IPC
-        D -->|UNIX Domain Socket| E[computeruse.sock]
-        E -->|二进制分帧: uint32LE + JSON-RPC 2.0| F[IPC 消息派发器]
+    subgraph sub2 ["进程间通信 IPC"]
+        D -->|UNIX Domain Socket| E["computeruse.sock"]
+        E -->|"二进制分帧: uint32LE + JSON-RPC 2.0"| F["IPC 消息派发器"]
     end
 
-    subgraph macOS 原生守护进程: Codex Computer Use.app
-        F --> G[SkyComputerUseService 核心服务]
-        G --> H[CUALockScreenGuardian 锁屏守卫]
-        G --> I[macOS Accessibility API (AXUIElement 树)]
-        G --> J[ScreenCaptureKit / CoreGraphics 屏幕截图]
-        G --> K[CGEvent 虚拟键鼠驱动]
+    subgraph sub3 ["macOS 原生守护进程: Codex Computer Use.app"]
+        F --> G["SkyComputerUseService 核心服务"]
+        G --> H["CUALockScreenGuardian 锁屏守卫"]
+        G --> I["macOS Accessibility API (AXUIElement 树)"]
+        G --> J["ScreenCaptureKit / CoreGraphics 屏幕截图"]
+        G --> K["CGEvent 虚拟键鼠驱动"]
     end
 
-    subgraph 外部扩展机制
-        L[SkyComputerUseClient] -->|mcp 参数| M[独立 MCP Server 接口]
-        N[Record & Replay 插件] -->|录制用户操作流| O[自动逆向生成新 Skill]
+    subgraph sub4 ["外部扩展机制"]
+        L["SkyComputerUseClient"] -->|mcp 参数| M["独立 MCP Server 接口"]
+        N["Record & Replay 插件"] -->|录制用户操作流| O["自动逆向生成新 Skill"]
     end
 ```
 
